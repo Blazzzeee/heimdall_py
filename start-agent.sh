@@ -58,7 +58,7 @@ if [ -n "${INFRA_API_URL:-}" ]; then
 else
   export WEBHOOK_URL="http://localhost:8000/webhook"
 fi
-export WEBHOOK_SECRET="super-secret-key"
+export WEBHOOK_SECRET="${INFRA_API_KEY:-super-secret-key}"
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
 # --- Start tmux session ---
