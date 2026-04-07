@@ -17,6 +17,11 @@ PROD=${PROD:-false}
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PARENT_VENV_PY="$ROOT_DIR/../.venv/bin/python"
 LOCAL_VENV_PY="$ROOT_DIR/.venv/bin/python"
+if [ -f "$ROOT_DIR/.env" ]; then
+  set -a
+  . "$ROOT_DIR/.env"
+  set +a
+fi
 if [ -x "$LOCAL_VENV_PY" ]; then
   PYTHON_BIN="$LOCAL_VENV_PY"
 elif [ -x "$PARENT_VENV_PY" ]; then
@@ -59,7 +64,7 @@ export WEBHOOK_SECRET="super-secret-key"
 export INFRA_API_KEY="heimdall"
 export HEIMDALL_ENV="dev"
 export HEIMDALL_ALLOW_DEFAULTS="1"
-export INFRA_API_URL="http://localhost:$CTRL_PORT"
+export INFRA_API_URL="${INFRA_API_URL:-http://localhost:$CTRL_PORT}"
 export HEIMDALL_API_PORT=$CTRL_PORT
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
