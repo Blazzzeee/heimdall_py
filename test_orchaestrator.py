@@ -3,7 +3,6 @@ import asyncio
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("HEIMDALL_ENV", "test")
 os.environ.setdefault("HEIMDALL_ALLOW_DEFAULTS", "1")
 os.environ.setdefault("INFRA_API_KEY", "heimdall")
 os.environ.setdefault("WEBHOOK_SECRET", "super-secret-key")
@@ -70,7 +69,7 @@ def test_node_heartbeat():
 
 def test_orchestrator_check_node_online(monkeypatch):
     db = SessionLocal()
-    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001", env="prod", status="UNKNOWN", fail_count=1)
+    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001", status="UNKNOWN", fail_count=1)
     db.add(test_node)
     db.commit()
     node_id = test_node.id
@@ -89,7 +88,7 @@ def test_orchestrator_check_node_online(monkeypatch):
 
 def test_orchestrator_check_node_offline(monkeypatch):
     db = SessionLocal()
-    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001", env="prod", status="UNKNOWN", fail_count=api.FAIL_THRESHOLD - 1)
+    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001", status="UNKNOWN", fail_count=api.FAIL_THRESHOLD - 1)
     db.add(test_node)
     db.commit()
     node_id = test_node.id
@@ -107,7 +106,7 @@ def test_orchestrator_check_node_offline(monkeypatch):
 
 def test_orchestrator_node_status_transition(monkeypatch):
     db = SessionLocal()
-    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001", env="prod", status="UNKNOWN", fail_count=0)
+    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001", status="UNKNOWN", fail_count=0)
     db.add(test_node)
     db.commit()
     node_id = test_node.id
@@ -133,7 +132,7 @@ def test_orchestrator_node_status_transition(monkeypatch):
 def test_orchestrator_nodes_endpoint(monkeypatch):
     # Register a node
     db = SessionLocal()
-    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001", env="prod")
+    test_node = Node(name="node1", uuid="node1-uuid", host="http://localhost:8001")
     db.add(test_node)
     db.commit()
     db.close()
@@ -141,7 +140,7 @@ def test_orchestrator_nodes_endpoint(monkeypatch):
     # Prevent monitor task racing in test client startup
     monkeypatch.setattr(api.app.router, "on_startup", [])
     client = TestClient(api.app)
-    r = client.get("/nodes", headers={"X-API-Key": "heimdall"})
+    r = client.get("/nodes", headers={"X-API-Key": api.INFRA_API_KEY})
     assert r.status_code == 200
     body = r.json()
     assert any(n["name"] == "node1" for n in body)

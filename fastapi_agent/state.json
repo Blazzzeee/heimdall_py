@@ -5,13 +5,13 @@
     "health_url": null
   },
   "service-1": {
-    "pid": 30868,
-    "status": "dead",
+    "pid": 38086,
+    "status": "unhealthy",
     "health_url": "http://127.0.0.1:5000/"
   },
-  "worker-1": {
-    "pid": 30941,
+  "port": {
+    "pid": null,
     "status": "healthy",
-    "health_url": null
+    "health_url": "http://127.0.0.1:3000/"
   }
 }

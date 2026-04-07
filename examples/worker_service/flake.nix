@@ -32,6 +32,12 @@
         devShells.default = pkgs.mkShell {
           buildInputs = [ pythonEnv ];
         };
+
+        heimdall-manifest = {
+          commands = {
+            deploy = "${run-script}/bin/run-worker";
+          };
+        };
       }
     );
 }

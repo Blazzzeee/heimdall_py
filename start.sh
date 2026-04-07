@@ -60,10 +60,16 @@ sleep 1
 # Create a place to store logs
 mkdir -p logs
 
-export INFRA_API_KEY="heimdall"
-export HEIMDALL_ENV="dev"
+if [ -z "${INFRA_API_KEY:-}" ]; then
+  echo "❌ INFRA_API_KEY is required. Set it in .env or export it before running."
+  exit 1
+fi
 export HEIMDALL_ALLOW_DEFAULTS="1"
-export INFRA_API_URL="${INFRA_API_URL:-http://localhost:$CTRL_PORT}"
+if [ -z "${INFRA_API_URL:-}" ]; then
+  echo "❌ INFRA_API_URL is required. Set it in .env or export it before running."
+  exit 1
+fi
+export INFRA_API_URL="${INFRA_API_URL%/}"
 export HEIMDALL_API_PORT=$CTRL_PORT
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
@@ -79,7 +85,7 @@ tmux set-option -t "$SESSION_NAME" mouse on
 tmux set-option -t "$SESSION_NAME" monitor-activity on
 tmux set-option -t "$SESSION_NAME" visual-activity on
 
-tmux send-keys -t "$SESSION_NAME:0" "cd \"$ROOT_DIR\"; export INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_ENV=\"$HEIMDALL_ENV\" HEIMDALL_ALLOW_DEFAULTS=\"$HEIMDALL_ALLOW_DEFAULTS\" INFRA_API_URL=\"$INFRA_API_URL\" HEIMDALL_API_PORT=$HEIMDALL_API_PORT HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN api:app --host 0.0.0.0 --port $CTRL_PORT 2>&1 | tee logs/api.log" C-m
+tmux send-keys -t "$SESSION_NAME:0" "cd \"$ROOT_DIR\"; export INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_ALLOW_DEFAULTS=\"$HEIMDALL_ALLOW_DEFAULTS\" INFRA_API_URL=\"$INFRA_API_URL\" HEIMDALL_API_PORT=$HEIMDALL_API_PORT HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN api:app --host 0.0.0.0 --port $CTRL_PORT 2>&1 | tee logs/api.log" C-m
 
 echo "⏳ Waiting for Control Plane to be ready..."
 for i in {1..10}; do
@@ -98,7 +104,7 @@ db = SessionLocal()
 agent_port = os.environ.get("HEIMDALL_AGENT_PORT", "8001")
 node = db.query(Node).filter_by(name="local-agent").first()
 if not node:
-    node = Node(name="local-agent", uuid="local-agent", host=f"http://localhost:{agent_port}", env="dev")
+    node = Node(name="local-agent", uuid="local-agent", host=f"http://0.0.0.0:{agent_port}")
     db.add(node)
     db.commit()
 db.close()
@@ -130,9 +136,8 @@ fi
 echo ""
 
 echo "4. Starting fastapi_agent (Node Agent) on port $AGENT_PORT..."
-export WEBHOOK_URL="http://localhost:$CTRL_PORT/webhook"
 tmux new-window -t "$SESSION_NAME" -n agent
-tmux send-keys -t "$SESSION_NAME:1" "cd \"$ROOT_DIR/fastapi_agent\"; export WEBHOOK_URL=\"$WEBHOOK_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/node.log" C-m
+tmux send-keys -t "$SESSION_NAME:1" "cd \"$ROOT_DIR/fastapi_agent\"; export INFRA_API_URL=\"$INFRA_API_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/node.log" C-m
 
 echo "5. Starting Discord Bot..."
 export SSL_CERT_FILE=$($PYTHON_BIN -m certifi)

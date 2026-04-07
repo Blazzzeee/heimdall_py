@@ -5,12 +5,11 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("HEIMDALL_ENV", "test")
 os.environ.setdefault("HEIMDALL_ALLOW_DEFAULTS", "1")
 os.environ.setdefault("INFRA_API_KEY", "heimdall")
 os.environ.setdefault("WEBHOOK_SECRET", "super-secret-key")
 
-from api import app, WEBHOOK_SECRET
+from api import app, INFRA_API_KEY
 from db import SessionLocal, Node, ServiceInstance, Operation, init_db
 
 
@@ -35,7 +34,7 @@ client = TestClient(app)
 
 def sign_payload(payload: dict):
     body = json.dumps(payload).encode("utf-8")
-    digest = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    digest = hmac.new(INFRA_API_KEY.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return body, {"x-signature": f"sha256={digest}", "Content-Type": "application/json"}
 
 
@@ -44,12 +43,12 @@ def sign_payload(payload: dict):
 def test_webhook_deploy():
     # Setup: register a node first
     db = SessionLocal()
-    node = Node(name="test-node", uuid="test-uuid", host="localhost", env="prod")
+    node = Node(name="test-node", uuid="test-uuid", host="localhost")
     db.add(node)
     db.commit()
     db.close()
 
-    payload = {"action": "deploy", "service": "api", "version": "v1", "env": "prod"}
+    payload = {"action": "deploy", "service": "api", "version": "v1"}
     body, headers = sign_payload(payload)
 
     r = client.post("/webhook", data=body, headers=headers)
@@ -67,7 +66,6 @@ def test_webhook_register():
     payload = {
         "action": "register",
         "service": "node-v2",
-        "env": "prod",
         "metadata": {"name": "node-v2", "host": "http://localhost:8002"},
     }
     body, headers = sign_payload(payload)
@@ -83,7 +81,7 @@ def test_webhook_register():
 
 
 def test_webhook_invalid_signature():
-    payload = {"action": "deploy", "service": "api", "env": "prod"}
+    payload = {"action": "deploy", "service": "api"}
     body = json.dumps(payload).encode("utf-8")
 
     r = client.post("/webhook", data=body, headers={"x-signature": "sha256=bad"})
@@ -91,7 +89,7 @@ def test_webhook_invalid_signature():
 
 
 def test_webhook_missing_header():
-    payload = {"action": "deploy", "service": "api", "env": "prod"}
+    payload = {"action": "deploy", "service": "api"}
     body = json.dumps(payload).encode("utf-8")
 
     r = client.post("/webhook", data=body)
@@ -100,12 +98,12 @@ def test_webhook_missing_header():
 
 # ── Infra control tests ─────────────────────────────────────────────────────
 
-API_KEY_HEADER = {"X-API-Key": "heimdall"}
+API_KEY_HEADER = {"X-API-Key": INFRA_API_KEY}
 
 
 def test_declare_service():
     db = SessionLocal()
-    db.add(Node(name="declare-node", uuid="uuid-declare", host="http://localhost:8004", env="dev"))
+    db.add(Node(name="declare-node", uuid="uuid-declare", host="http://localhost:8004"))
     db.commit()
     db.close()
 
@@ -117,11 +115,17 @@ def test_declare_service():
     }, headers=API_KEY_HEADER)
     assert r.status_code == 200
     
-    # Deploy without node_name and flake
+    # Add deploy command to the declared service
+    db = SessionLocal()
+    svc = db.query(ServiceInstance).filter(ServiceInstance.name == "declared-svc").first()
+    svc.commands = {"deploy": "default"}
+    db.commit()
+    db.close()
+
+    # Deploy without node_name
     r = client.post("/deploy", json={
         "service": "declared-svc",
         "version": "v2",
-        "environment": "dev",
     }, headers=API_KEY_HEADER)
     assert r.status_code == 200
     data = r.json()
@@ -136,18 +140,25 @@ def test_declare_service():
 
 def test_deploy_endpoint_with_node():
     db = SessionLocal()
-    db.add(Node(name="deploy-node", uuid="uuid-1", host="http://localhost:8001", env="dev"))
+    node = Node(name="deploy-node", uuid="uuid-1", host="http://localhost:8001")
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    db.add(ServiceInstance(
+        node_id=node.id,
+        name="api-gateway",
+        service_uuid="api-gateway",
+        flake="github:org/repo#api",
+        commands={"deploy": "api"},
+    ))
     db.commit()
     db.close()
 
     r = client.post("/deploy", json={
         "service": "api-gateway",
         "node_name": "deploy-node",
-        "repo_url": "github:org/repo",
-        "flake": "github:org/repo#api",
         "commands": ["nix run"],
         "version": "v1.4.2",
-        "environment": "dev",
     }, headers=API_KEY_HEADER)
     assert r.status_code == 200
     data = r.json()
@@ -156,9 +167,23 @@ def test_deploy_endpoint_with_node():
 
 
 def test_teardown_endpoint():
+    db = SessionLocal()
+    node = Node(name="teardown-node", uuid="uuid-td", host="http://localhost:8009")
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    db.add(ServiceInstance(
+        node_id=node.id,
+        name="api-gateway",
+        service_uuid="api-gateway",
+        flake="github:org/repo#api",
+        commands={"teardown": "api"},
+    ))
+    db.commit()
+    db.close()
+
     r = client.post("/teardown", json={
         "service": "api-gateway",
-        "environment": "dev",
         "confirm": True,
     }, headers=API_KEY_HEADER)
     assert r.status_code == 200
@@ -169,7 +194,6 @@ def test_teardown_endpoint():
 def test_rollback_endpoint():
     r = client.post("/rollback", json={
         "service": "api-gateway",
-        "environment": "dev",
         "target_version": "v1.4.1",
     }, headers=API_KEY_HEADER)
     assert r.status_code == 200
@@ -180,7 +204,17 @@ def test_rollback_endpoint():
 def test_operation_status():
     # Setup node
     db = SessionLocal()
-    db.add(Node(name="status-node", uuid="uuid-2", host="http://localhost:8002", env="dev"))
+    node = Node(name="status-node", uuid="uuid-2", host="http://localhost:8002")
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    db.add(ServiceInstance(
+        node_id=node.id,
+        name="api-gateway",
+        service_uuid="api-gateway",
+        flake="github:org/repo#api",
+        commands={"deploy": "api"},
+    ))
     db.commit()
     db.close()
 
@@ -189,7 +223,6 @@ def test_operation_status():
         "service": "api-gateway",
         "node_name": "status-node",
         "version": "v1.0.0",
-        "environment": "dev",
     }, headers=API_KEY_HEADER)
     op_id = r.json()["operation_id"]
 
@@ -205,13 +238,30 @@ def test_operation_status():
 def test_list_operations():
     # Setup node
     db = SessionLocal()
-    db.add(Node(name="list-node", uuid="uuid-3", host="http://localhost:8003", env="dev"))
+    node = Node(name="list-node", uuid="uuid-3", host="http://localhost:8003")
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    db.add(ServiceInstance(
+        node_id=node.id,
+        name="svc1",
+        service_uuid="svc1",
+        flake="github:org/repo#svc1",
+        commands={"deploy": "svc1"},
+    ))
+    db.add(ServiceInstance(
+        node_id=node.id,
+        name="svc2",
+        service_uuid="svc2",
+        flake="github:org/repo#svc2",
+        commands={"deploy": "svc2"},
+    ))
     db.commit()
     db.close()
 
     # Create a couple operations
-    client.post("/deploy", json={"service": "svc1", "node_name": "list-node", "version": "v1", "environment": "dev"}, headers=API_KEY_HEADER)
-    client.post("/deploy", json={"service": "svc2", "node_name": "list-node", "version": "v2", "environment": "dev"}, headers=API_KEY_HEADER)
+    client.post("/deploy", json={"service": "svc1", "node_name": "list-node", "version": "v1"}, headers=API_KEY_HEADER)
+    client.post("/deploy", json={"service": "svc2", "node_name": "list-node", "version": "v2"}, headers=API_KEY_HEADER)
 
     r = client.get("/operations", headers=API_KEY_HEADER)
     assert r.status_code == 200
@@ -230,7 +280,6 @@ def test_deploy_unauthorized():
         "service": "api-gateway",
         "node_name": "auth-node",
         "version": "v1",
-        "environment": "dev",
     })
     assert r.status_code == 401
 
@@ -243,7 +292,7 @@ def test_health():
 
 def test_nodes_endpoint():
     db = SessionLocal()
-    db.add(Node(name="n1", uuid="u1", host="http://localhost:8001", env="prod"))
+    db.add(Node(name="n1", uuid="u1", host="http://localhost:8001"))
     db.commit()
     db.close()
 

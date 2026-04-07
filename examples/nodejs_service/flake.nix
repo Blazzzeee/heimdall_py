@@ -33,7 +33,9 @@
 
         # Heimdall Metadata
         heimdall-manifest = {
-          commands = [ "run" ];
+          commands = {
+            deploy = "${run-script}/bin/run-node";
+          };
           healthcheck_url = "http://127.0.0.1:3000/";
         };
       }

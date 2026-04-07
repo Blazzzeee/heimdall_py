@@ -76,35 +76,56 @@ async def send_agent_inspect(node_host: str, flake_path: str):
         res.raise_for_status()
         return res.json()
 
-async def run_deploy(op_id: str, req: DeployRequest, node_host: str | None = None):
-    _mark(op_id, "running", f"Sending deploy command to agent on {req.node_name}...")
+async def run_command(
+    op_id: str,
+    req: DeployRequest,
+    node_host: str | None = None,
+    healthcheck_url: str | None = None,
+    command_value: str | None = None,
+    command_name: str | None = None,
+    command_kind: str | None = None,
+):
+    label = command_name or "command"
+    node_label = getattr(req, "node_name", None) or "unknown"
+    _mark(op_id, "running", f"Sending {label} command to agent on {node_label}...")
     try:
         if not node_host:
-            raise ValueError("Node host is required to dispatch deploy to agent.")
-        if not req.flake:
+            raise ValueError("Node host is required to dispatch command to agent.")
+        effective_flake = command_value or getattr(req, "flake", None)
+        if not effective_flake:
             raise ValueError("A Nix flake reference is required to hit the agent's /command endpoint.")
         
         payload = {
             "operation_id": op_id,
             "service": req.service,
-            "flake": req.flake,
-            "healthcheck_url": req.healthcheck_url,
+            "healthcheck_url": healthcheck_url,
+            "flake": effective_flake,
         }
         
         response = await send_agent_command(node_host, payload)
         
         if response.get("status") == "accepted":
-            _mark(op_id, "running", f"Agent accepted deployment. Waiting for health status...")
+            _mark(op_id, "running", f"Agent accepted {label}. Waiting for status...")
             # Note: The actual success/fail status will be pushed asynchronously 
             # by the agent via the /webhook endpoint. We leave the operation as "running".
         elif response.get("status") == "already running":
             _mark(op_id, "running", f"Service is currently locked/deploying. Waiting...")
         else:
             err = response.get("error", "Unknown error")
-            _mark(op_id, "failed", f"Agent rejected deployment: {err}", error=err)
+            _mark(op_id, "failed", f"Agent rejected {label}: {err}", error=err)
 
     except Exception as e:
         _mark(op_id, "failed", "Failed to communicate with agent.", error=str(e))
+
+async def run_deploy(
+    op_id: str,
+    req: DeployRequest,
+    node_host: str | None = None,
+    healthcheck_url: str | None = None,
+    command_value: str | None = None,
+    command_kind: str | None = None,
+):
+    await run_command(op_id, req, node_host, healthcheck_url, command_value, "deploy", command_kind)
 
 
 async def run_teardown(op_id: str, req: TeardownRequest):
@@ -123,6 +144,6 @@ async def run_rollback(op_id: str, req: RollbackRequest):
     try:
         # Agent has no specific rollback endpoint yet.
         await asyncio.sleep(2)
-        _mark(op_id, "success", f"Rolled back {req.service} to {req.target_version} in {req.environment}.")
+        _mark(op_id, "success", f"Rolled back {req.service} to {req.target_version}.")
     except Exception as e:
         _mark(op_id, "failed", "Rollback failed.", error=str(e))

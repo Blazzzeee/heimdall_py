@@ -21,7 +21,7 @@ def _require_secret(name: str, default: str | None = None) -> str:
     raise RuntimeError(f"{name} must be set for environment '{HEIMDALL_ENV}'.")
 
 
-INFRA_API_KEY = _require_secret("INFRA_API_KEY", "heimdall")
+INFRA_API_KEY = _require_secret("INFRA_API_KEY")
 WEBHOOK_TTL_SECONDS = int(os.getenv("WEBHOOK_TTL_SECONDS", "60"))
 FAIL_THRESHOLD = int(os.getenv("FAIL_THRESHOLD", "3"))
 MONITOR_INTERVAL_SECONDS = float(os.getenv("MONITOR_INTERVAL_SECONDS", "5"))

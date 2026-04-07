@@ -53,12 +53,15 @@ mkdir -p logs
 touch logs/agent.log
 
 # --- Env ---
-if [ -n "${INFRA_API_URL:-}" ]; then
-  export WEBHOOK_URL="${INFRA_API_URL%/}/webhook"
-else
-  export WEBHOOK_URL="http://localhost:8000/webhook"
+if [ -z "${INFRA_API_URL:-}" ]; then
+  echo "❌ INFRA_API_URL is required. Set it in .env or export it before running."
+  exit 1
 fi
-export INFRA_API_KEY="${INFRA_API_KEY:-heimdall}"
+if [ -z "${INFRA_API_KEY:-}" ]; then
+  echo "❌ INFRA_API_KEY is required. Set it in .env or export it before running."
+  exit 1
+fi
+export INFRA_API_URL="${INFRA_API_URL%/}"
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
 # --- Start tmux session ---
@@ -69,7 +72,7 @@ echo "⚡ Starting agent on port $AGENT_PORT..."
 
 tmux send-keys -t "$SESSION_NAME:0" \
   "cd \"$ROOT_DIR/fastapi_agent\"; \
-   export WEBHOOK_URL=\"$WEBHOOK_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; \
+   export INFRA_API_URL=\"$INFRA_API_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; \
    $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/agent.log" C-m
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

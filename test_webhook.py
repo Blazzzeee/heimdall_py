@@ -5,12 +5,11 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("HEIMDALL_ENV", "test")
 os.environ.setdefault("HEIMDALL_ALLOW_DEFAULTS", "1")
 os.environ.setdefault("INFRA_API_KEY", "heimdall")
 os.environ.setdefault("WEBHOOK_SECRET", "super-secret-key")
 
-from api import app, WEBHOOK_SECRET
+from api import app, INFRA_API_KEY
 from db import SessionLocal, Node, ServiceInstance, Operation, init_db
 
 @pytest.fixture(autouse=True)
@@ -27,13 +26,13 @@ client = TestClient(app)
 
 def sign_payload(payload: dict):
     body = json.dumps(payload).encode("utf-8")
-    digest = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    digest = hmac.new(INFRA_API_KEY.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return body, {"X-Signature": f"sha256={digest}", "Content-Type": "application/json"}
 
 def test_webhook_deploy_success():
     # Setup node
     db = SessionLocal()
-    node = Node(name="test-node", uuid="test-node-uuid", host="localhost", env="prod")
+    node = Node(name="test-node", uuid="test-node-uuid", host="localhost")
     db.add(node)
     db.commit()
     db.close()
@@ -41,8 +40,7 @@ def test_webhook_deploy_success():
     payload = {
         "action": "deploy",
         "service": "api",
-        "version": "v1",
-        "env": "prod"
+        "version": "v1"
     }
     body, headers = sign_payload(payload)
     
@@ -61,7 +59,6 @@ def test_webhook_register_success():
     payload = {
         "action": "register",
         "service": "node-v2",
-        "env": "prod",
         "metadata": {
             "name": "node-v2",
             "host": "http://localhost:8002"
@@ -79,7 +76,7 @@ def test_webhook_register_success():
     db.close()
 
 def test_webhook_invalid_signature():
-    payload = {"action": "deploy", "service": "api", "env": "prod"}
+    payload = {"action": "deploy", "service": "api"}
     body, headers = sign_payload(payload)
     headers["X-Signature"] = "sha256=invalid"
     
@@ -90,7 +87,7 @@ def test_nodes_endpoint():
     # Register a node first
     test_webhook_register_success()
     
-    response = client.get('/nodes', headers={"X-API-Key": "heimdall"})
+    response = client.get('/nodes', headers={"X-API-Key": INFRA_API_KEY})
     assert response.status_code == 200
     nodes = response.json()
     assert any(n['name'] == 'node-v2' for n in nodes)

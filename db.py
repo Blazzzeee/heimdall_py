@@ -15,7 +15,6 @@ class Node(Base):
     uuid = Column(String, nullable=False, unique=True)
 
     host = Column(String, nullable=False)
-    env = Column(String, nullable=False)  # dev / test / prod
 
     status = Column(String, default="UNKNOWN")
     fail_count = Column(Integer, default=0)
@@ -45,7 +44,6 @@ class ServiceInstance(Base):
     flake = Column(String, nullable=True)          # e.g. github:org/repo#api
     commands = Column(JSON, nullable=True)         # e.g. ["run", "migrate"]
     healthcheck_url = Column(String, nullable=True)
-    env = Column(String, nullable=False)
     triggered_by = Column(String, nullable=True)
 
     status = Column(String, default="idle")  # idle, running, failed
@@ -73,7 +71,6 @@ class Operation(Base):
 
     # Service info (denormalized for quick access without joins)
     service_name = Column(String, nullable=True)
-    environment = Column(String, nullable=True)
     version = Column(String, nullable=True)
     target_version = Column(String, nullable=True)
 
@@ -120,3 +117,23 @@ def init_db():
                 conn.commit()
             except Exception as e:
                 print(f"❌ Failed to add column: {e}")
+
+        # Remove legacy env columns if present
+        def _column_exists(table: str, column: str) -> bool:
+            try:
+                rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+                return any(r[1] == column for r in rows)
+            except Exception:
+                return False
+
+        for table, column in [
+            ("nodes", "env"),
+            ("service_instances", "env"),
+            ("operations", "environment"),
+        ]:
+            if _column_exists(table, column):
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+                    conn.commit()
+                except Exception as e:
+                    print(f"⚠️  Failed to drop {table}.{column}. Recreate DB to remove it. Error: {e}")

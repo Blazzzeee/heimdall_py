@@ -30,7 +30,6 @@ if not API_KEY:
     raise RuntimeError("INFRA_API_KEY is not set.")
 
 HEADERS       = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
-ENVS          = ["dev", "staging", "prod"]
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 
@@ -58,20 +57,6 @@ async def api_get(path: str) -> dict:
             r.raise_for_status()
             return await r.json()
 
-# ── Helpers (Advanced) ────────────────────────────────────────────────────────
-
-async def node_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    try:
-        nodes = await api_get("/nodes")
-        return [app_commands.Choice(name=n['name'], value=n['name']) for n in nodes if current.lower() in n['name'].lower()][:25]
-    except: return []
-
-async def service_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    try:
-        services = await api_get("/services")
-        return [app_commands.Choice(name=s['name'], value=s['name']) for s in services if current.lower() in s['name'].lower()][:25]
-    except: return []
-
 async def send_error_embed(interaction: discord.Interaction, error: str):
     embed = discord.Embed(title="❌ Heimdall API — Error", description=f"```{error}```", color=discord.Color.red())
     if "Connect call failed" in error or "Cannot connect to host" in error:
@@ -92,7 +77,6 @@ def op_embed(op: dict) -> discord.Embed:
     color = {"success": discord.Color.green(), "failed": discord.Color.red(), "running": discord.Color.yellow(), "pending": discord.Color.blurple()}.get(s, discord.Color.greyple())
     embed = discord.Embed(title=f"{status_emoji(s)}  {op.get('type','op').capitalize()} — {s.upper()}", description=op.get("message", ""), color=color)
     embed.add_field(name="Service", value=op.get("service", "—"), inline=True)
-    embed.add_field(name="Environment", value=op.get("environment", "—"), inline=True)
     if op.get("version"): embed.add_field(name="Version", value=f"`{op['version']}`", inline=True)
     url = op.get("healthcheck_url")
     if url: embed.add_field(name="Deployment URL", value=f"[Go to Service]({url})\n`{url}`", inline=False)
@@ -143,11 +127,21 @@ async def send_live_health_monitor(interaction: discord.Interaction, service_nam
             await asyncio.sleep(5)
     asyncio.create_task(monitor_loop())
 
+def normalize_agent_host(host: str) -> str:
+    raw = host.strip()
+    if not raw:
+        return raw
+    if "://" in raw:
+        return raw
+    if ":" in raw:
+        return f"http://{raw}"
+    return f"http://{raw}:8001"
+
 @tree.command(name="register-node", description="Register a new infrastructure node (agent).")
-@app_commands.describe(name="Display name for the node", node_id="Unique identifier for the node", host="Agent URL (e.g. http://10.0.0.5:8001)")
+@app_commands.describe(name="Display name for the node", node_id="Unique identifier for the node", host="Agent host or IP (e.g. nixos or 10.0.0.5)")
 async def cmd_node_register(interaction: discord.Interaction, name: str, node_id: str, host: str):
     await safe_defer(interaction)
-    payload = {"name": name, "uuid": node_id, "host": host}
+    payload = {"name": name, "uuid": node_id, "host": normalize_agent_host(host)}
     try:
         resp = await api_post("/nodes", payload)
         await interaction.followup.send(f"✅ {resp.get('message', 'Node registered.')}")
@@ -155,7 +149,6 @@ async def cmd_node_register(interaction: discord.Interaction, name: str, node_id
 
 @tree.command(name="register", description="Declare a new service configuration.")
 @app_commands.describe(service="Service name", node_name="Target node name", flake="Nix flake reference")
-@app_commands.autocomplete(node_name=node_autocomplete)
 async def cmd_register(interaction: discord.Interaction, service: str, node_name: str, flake: str = None):
     await safe_defer(interaction)
     payload = {"service": service, "node_name": node_name, "triggered_by": str(interaction.user)}
@@ -170,17 +163,12 @@ async def cmd_register(interaction: discord.Interaction, service: str, node_name
         if "Connect" in str(e): await send_live_health_monitor(interaction, service_name=service)
 
 @tree.command(name="deploy", description="Trigger a project deployment.")
-@app_commands.describe(service="Service name", node_name="Override node", flake="Override flake", version="Version tag/branch")
-@app_commands.autocomplete(service=service_autocomplete, node_name=node_autocomplete)
-async def cmd_deploy(interaction: discord.Interaction, service: str, node_name: str = None, repo_url: str = None, flake: str = None, version: str = "latest"):
+@app_commands.describe(service="Service name", node_name="Override node", version="Version tag/branch")
+async def cmd_deploy(interaction: discord.Interaction, service: str, node_name: str = None, version: str = "latest"):
     await safe_defer(interaction)
     payload = {"service": service, "version": version, "triggered_by": str(interaction.user)}
     if node_name:
         payload["node_name"] = node_name
-    if repo_url:
-        payload["repo_url"] = repo_url
-    if flake:
-        payload["flake"] = flake
     try:
         resp = await api_post("/deploy", payload)
         op_id = resp["operation_id"]
@@ -194,7 +182,6 @@ async def cmd_deploy(interaction: discord.Interaction, service: str, node_name: 
 
 @tree.command(name="teardown", description="Decommission a service from its node.")
 @app_commands.describe(service="Service name to teardown")
-@app_commands.autocomplete(service=service_autocomplete)
 async def cmd_teardown(interaction: discord.Interaction, service: str):
     await safe_defer(interaction)
     try:
@@ -205,9 +192,24 @@ async def cmd_teardown(interaction: discord.Interaction, service: str):
         await interaction.followup.send(embed=op_embed(op))
     except Exception as e: await send_error_embed(interaction, str(e))
 
+@tree.command(name="command", description="Run a manifest command for a service.")
+@app_commands.describe(service="Service name", command="Manifest command name", node_name="Override node")
+async def cmd_command(interaction: discord.Interaction, service: str, command: str, node_name: str = None):
+    await safe_defer(interaction)
+    payload = {"service": service, "command": command, "triggered_by": str(interaction.user)}
+    if node_name:
+        payload["node_name"] = node_name
+    try:
+        resp = await api_post("/command", payload)
+        op_id = resp["operation_id"]
+        msg = await interaction.followup.send(embed=discord.Embed(title="⏳ Command queued", description=resp["message"], color=discord.Color.blurple()).set_footer(text=f"op_id: {op_id}"))
+        op = await poll_operation(op_id, message=msg)
+        await msg.edit(embed=op_embed(op))
+    except Exception as e:
+        await send_error_embed(interaction, str(e))
+
 @tree.command(name="rollback", description="Roll back a service.")
 @app_commands.describe(service="Service name", target_version="Version to roll back to")
-@app_commands.autocomplete(service=service_autocomplete)
 async def cmd_rollback(interaction: discord.Interaction, service: str, target_version: str, reason: str = ""):
     await safe_defer(interaction)
     try:
@@ -239,7 +241,7 @@ async def cmd_nodes(interaction: discord.Interaction):
         embed = discord.Embed(title=f"🖥️ Registered Nodes ({len(nodes)})", color=discord.Color.teal())
         for n in nodes:
             s = n.get("status", "UNKNOWN")
-            embed.add_field(name=f"{node_emoji(s)} {n['name']}", value=f"Host: `{n['host']}`\nEnv: `{n['env']}`", inline=True)
+            embed.add_field(name=f"{node_emoji(s)} {n['name']}", value=f"Host: `{n['host']}`", inline=True)
         await interaction.followup.send(embed=embed)
     except Exception as e: await send_error_embed(interaction, str(e))
 
@@ -259,17 +261,15 @@ async def cmd_services(interaction: discord.Interaction):
         for s in services:
             status = s.get("status", "unknown")
             node = s.get("node_name", "—")
-            env = s.get("environment", "—")
             emoji = status_emoji(status)
             
-            value = f"Node: `{node}`\nEnv: `{env}`\nStatus: **{status}**"
+            value = f"Node: `{node}`\nStatus: **{status}**"
             embed.add_field(name=f"{emoji} {s['name']}", value=value, inline=True)
 
         await interaction.followup.send(embed=embed)
     except Exception as e: await send_error_embed(interaction, str(e))
 
 @tree.command(name="health", description="Live health monitor.")
-@app_commands.autocomplete(service=service_autocomplete)
 async def cmd_health(interaction: discord.Interaction, service: str = None):
     await safe_defer(interaction)
     await send_live_health_monitor(interaction, service_name=service)

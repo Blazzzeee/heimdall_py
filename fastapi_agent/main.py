@@ -22,7 +22,10 @@ from app.logging_utils import setup_logging, bind_request_id
 load_dotenv()
 logger = setup_logging("heimdall.agent")
 STATE_FILE = os.getenv("HEIMDALL_STATE_FILE", os.path.join(os.path.dirname(__file__), "state.json"))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:8080/webhook")
+_infra_api_url = os.getenv("INFRA_API_URL")
+if not _infra_api_url:
+    raise RuntimeError("INFRA_API_URL environment variable must be set for webhook delivery.")
+CONTROL_PLANE_WEBHOOK_URL = f"{_infra_api_url.rstrip('/')}/webhook"
 _secret_value = os.getenv("INFRA_API_KEY")
 if not _secret_value:
     raise RuntimeError("INFRA_API_KEY environment variable must be set for webhook signing.")
@@ -57,7 +60,7 @@ async def send_webhook(payload: dict):
         "Content-Type": "application/json"
     }
     try:
-        await webhook_client.post(WEBHOOK_URL, content=body_str.encode(), headers=headers)
+        await webhook_client.post(CONTROL_PLANE_WEBHOOK_URL, content=body_str.encode(), headers=headers)
     except Exception as e:
         print(f"Failed to send webhook: {e}")
 
@@ -82,28 +85,32 @@ async def health_check_loop():
             for svc, data in service_state.items():
                 pid = data.get("pid")
                 health_url = data.get("health_url")
+                status = None
+
                 if pid:
                     try:
                         os.kill(pid, 0)
                         status = "healthy"
                     except OSError:
                         status = "dead"
-                        
-                    if status == "healthy" and health_url:
-                        try:
-                            async with httpx.AsyncClient(timeout=2.0) as client:
-                                res = await client.get(health_url)
-                                if res.status_code != 200:
-                                    status = "unhealthy"
-                        except Exception:
-                            status = "unhealthy"
-                    
-                    if data.get("status") != status:
-                        service_state[svc]["status"] = status
-                        save_state()
-                        await send_webhook({"type": "status", "service": svc, "status": status})
-                        if status == "dead" and svc in service_locks and service_locks[svc].locked():
-                            service_locks[svc].release()
+
+                if health_url:
+                    try:
+                        async with httpx.AsyncClient(timeout=2.0) as client:
+                            res = await client.get(health_url)
+                            if res.status_code == 200:
+                                status = "healthy"
+                            else:
+                                status = "unhealthy"
+                    except Exception:
+                        status = "unhealthy"
+
+                if status and data.get("status") != status:
+                    service_state[svc]["status"] = status
+                    save_state()
+                    await send_webhook({"type": "status", "service": svc, "status": status})
+                    if status == "dead" and svc in service_locks and service_locks[svc].locked():
+                        service_locks[svc].release()
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -171,8 +178,35 @@ def save_state():
 class CommandRequest(BaseModel):
     operation_id: str
     service: str
-    flake: str
+    flake: str | None = None
     healthcheck_url: str | None = None
+
+class InspectRequest(BaseModel):
+    flake: str
+
+def _resolve_flake_cwd(flake_ref: str) -> str | None:
+    flake_cwd = None
+    if flake_ref.startswith("path:"):
+        flake_cwd = flake_ref[len("path:"):]
+    elif flake_ref.startswith(("/", "./", "../", "~")):
+        flake_cwd = flake_ref
+    if flake_cwd:
+        flake_cwd = os.path.abspath(os.path.expanduser(flake_cwd))
+    return flake_cwd
+
+async def _current_system() -> str | None:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        out, _err = await proc.communicate()
+        if proc.returncode == 0:
+            return out.decode(errors="replace").strip() or None
+    except Exception:
+        return None
+    return None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -312,10 +346,17 @@ async def receive_command(command: CommandRequest):
         await lock.acquire()
     
     try:
+        if not command.flake:
+            lock.release()
+            return {"status": "failed", "error": "missing flake"}
+
         # Validate flake
         flake_ref = command.flake.split('#')[0]
+        flake_cwd = _resolve_flake_cwd(flake_ref)
+        print(f"Deploy start: service={svc} flake={command.flake} flake_ref={flake_ref} cwd={flake_cwd or os.getcwd()}")
         show_proc = await asyncio.create_subprocess_exec(
             "nix", "flake", "show", flake_ref,
+            cwd=flake_cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -325,24 +366,14 @@ async def receive_command(command: CommandRequest):
             lock.release()
             return {"status": "failed", "error": "invalid flake"}
 
-        # Evaluate manifest
-        eval_proc = await asyncio.create_subprocess_exec(
-            "nix", "eval", command.flake, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        eval_out, eval_err = await eval_proc.communicate()
-        if eval_proc.returncode == 0:
-            print("Manifest Evaluation Result:", eval_out.decode(errors="replace"))
-        else:
-            raise Exception(f"Manifest evaluation failed: {eval_err.decode(errors='replace')}")
-
         # Execute service
         process = await asyncio.create_subprocess_exec(
             "nix", "run", command.flake,
+            cwd=flake_cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
         )
+        print(f"Started nix run pid={process.pid} service={svc} flake={command.flake} cwd={flake_cwd or os.getcwd()}")
         
         service_state[svc] = {
             "pid": process.pid, 
@@ -357,13 +388,23 @@ async def receive_command(command: CommandRequest):
             asyncio.create_task(read_stream(process.stdout, svc, "stdout"))
             
         async def wait_and_release():
-            await process.wait()
+            returncode = await process.wait()
             if svc in service_state:
-                service_state[svc]["status"] = "dead"
+                if returncode == 0:
+                    # Process exited cleanly; health checks (if any) should determine status.
+                    service_state[svc]["pid"] = None
+                    service_state[svc]["status"] = "stopped"
+                else:
+                    service_state[svc]["status"] = "dead"
                 save_state()
             if lock.locked():
                 lock.release()
-            await send_webhook({"type": "status", "service": svc, "status": "dead"})
+            await send_webhook({
+                "type": "status",
+                "service": svc,
+                "status": "failed" if returncode != 0 else "stopped",
+                "error": None if returncode == 0 else f"exit code {returncode}",
+            })
             
         asyncio.create_task(wait_and_release())
         
@@ -374,6 +415,38 @@ async def receive_command(command: CommandRequest):
         lock.release()
         await send_webhook({"type": "status", "service": svc, "status": "failed", "error": str(e)})
         return {"status": "failed"}
+
+@app.post("/inspect", dependencies=[Depends(verify_hmac)])
+async def inspect_flake(req: InspectRequest):
+    flake_ref = req.flake.split('#')[0]
+    flake_cwd = _resolve_flake_cwd(flake_ref)
+    manifest_ref = f"{flake_ref}#heimdall-manifest"
+    try:
+        eval_proc = await asyncio.create_subprocess_exec(
+            "nix", "eval", manifest_ref, "--json",
+            cwd=flake_cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        eval_out, eval_err = await eval_proc.communicate()
+        if eval_proc.returncode != 0:
+            return {"status": "failed", "error": eval_err.decode(errors="replace")}
+        try:
+            manifest = json.loads(eval_out.decode(errors="replace"))
+        except json.JSONDecodeError as e:
+            return {"status": "failed", "error": f"Invalid JSON in manifest: {e}"}
+        # If manifest is per-system, resolve to current system
+        if isinstance(manifest, dict) and "commands" not in manifest:
+            system = await _current_system()
+            if system and system in manifest and isinstance(manifest[system], dict):
+                manifest = manifest[system]
+            elif len(manifest) == 1:
+                only_val = next(iter(manifest.values()))
+                if isinstance(only_val, dict):
+                    manifest = only_val
+        return {"status": "success", "manifest": manifest}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn

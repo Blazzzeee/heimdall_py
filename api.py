@@ -4,6 +4,7 @@ Heimdall — Unified Infra Control API
 Endpoints:
   POST /webhook          — HMAC-signed webhook ingestion (deploy/register)
   POST /deploy           — Deploy a service (API key auth)
+  POST /command          — Run a manifest command (API key auth)
   POST /teardown         — Teardown a service (API key auth)
   POST /rollback         — Rollback a service (API key auth)
   GET  /operations/{id}  — Check operation status (API key auth)
@@ -27,10 +28,12 @@ from threading import Lock
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import os
 
 from db import SessionLocal, Node, ServiceInstance, Operation, init_db
 from app.models import (
     DeployRequest, DeployResponse,
+    CommandRequest, CommandResponse,
     TeardownRequest, TeardownResponse,
     RollbackRequest, RollbackResponse,
     OperationStatus,
@@ -47,7 +50,7 @@ from app.config import (
     HEARTBEAT_TIMEOUT_SECONDS,
 )
 from app.logging_utils import setup_logging, bind_request_id
-from app.ops import run_deploy, run_teardown, run_rollback, send_agent_inspect
+from app.ops import run_deploy, run_rollback, run_command, send_agent_inspect
 
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -110,18 +113,34 @@ class WebhookPayload(BaseModel):
     action: str
     service: str
     version: str | None = None
-    env: str
     metadata: dict | None = None
 
 
 # ── Webhook helpers ───────────────────────────────────────────────────────────
 
-def get_nodes_by_env(env: str):
+def get_all_nodes():
     db = SessionLocal()
     try:
-        return db.query(Node).filter(Node.env == env).all()
+        return db.query(Node).all()
     finally:
         db.close()
+
+def resolve_command_flake(svc: ServiceInstance, command_name: str) -> tuple[str | None, str | None, str | None]:
+    if not svc or not svc.flake:
+        return None, None, "Service has no flake configured."
+    commands = svc.commands or {}
+    if not isinstance(commands, dict):
+        return None, None, "Service manifest commands are invalid or missing."
+    if command_name not in commands:
+        return None, None, f"Command '{command_name}' is not supported by the manifest."
+    command_value = commands[command_name]
+    if not isinstance(command_value, str) or not command_value.strip():
+        return None, None, f"Command '{command_name}' is invalid in the manifest."
+    command_value = command_value.strip()
+    base_ref = svc.flake.split("#")[0]
+    if any(sep in command_value for sep in (":", "/", "#")):
+        return command_value, "flake", None
+    return f"{base_ref}#{command_value}", "flake", None
 
 
 def get_or_create_service(node: Node, payload: WebhookPayload):
@@ -139,7 +158,6 @@ def get_or_create_service(node: Node, payload: WebhookPayload):
                 service_uuid=payload.service,
                 flake="default",
                 commands=[],
-                env=payload.env,
             )
             db.add(service)
             db.commit()
@@ -178,7 +196,6 @@ def handle_webhook(payload: WebhookPayload):
                     name=name,
                     uuid=name,
                     host=host,
-                    env=payload.env,
                 )
                 db.add(node)
                 db.commit()
@@ -186,7 +203,7 @@ def handle_webhook(payload: WebhookPayload):
             db.close()
         return
 
-    nodes = get_nodes_by_env(payload.env)
+    nodes = get_all_nodes()
     for node in nodes:
         service = get_or_create_service(node, payload)
         create_operation(
@@ -273,7 +290,6 @@ def handle_legacy_webhook(payload: dict):
         action: str
         service: str
         version: str | None = None
-        env: str
         metadata: dict | None = None
         
     p = LegacyWebhookPayload(**payload)
@@ -289,7 +305,6 @@ def handle_legacy_webhook(payload: dict):
                     name=name,
                     uuid=name,
                     host=host,
-                    env=p.env,
                 )
                 db.add(node)
                 db.commit()
@@ -297,7 +312,7 @@ def handle_legacy_webhook(payload: dict):
             db.close()
         return
 
-    nodes = get_nodes_by_env(p.env)
+    nodes = get_all_nodes()
     for node in nodes:
         service = get_or_create_service(node, p)
         create_operation(
@@ -348,6 +363,10 @@ def handle_agent_webhook(payload: dict):
                     if new_status == "healthy":
                         op.status = "success"
                         op.message = "Agent reported service is healthy."
+                        op.finished_at = datetime.now(UTC)
+                    elif new_status == "stopped":
+                        op.status = "success"
+                        op.message = "Agent reported service exited cleanly."
                         op.finished_at = datetime.now(UTC)
                     elif new_status in ("failed", "dead"):
                         op.status = "failed"
@@ -416,6 +435,8 @@ async def declare_service(
         node = db.query(Node).filter(Node.name == req.node_name).first()
         if not node:
             raise HTTPException(status_code=404, detail=f"Node '{req.node_name}' not found")
+        node_host = node.host
+        node_host = node.host
             
         svc = db.query(ServiceInstance).filter(
             ServiceInstance.node_id == node.id,
@@ -427,7 +448,6 @@ async def declare_service(
                 node_id=node.id,
                 name=req.service,
                 service_uuid=req.service,
-                env=node.env
             )
             db.add(svc)
             
@@ -439,18 +459,17 @@ async def declare_service(
                 inspection = await send_agent_inspect(node.host, req.flake)
                 if inspection.get("status") == "success":
                     manifest = inspection.get("manifest", {})
-                    manifest_commands = manifest.get("commands", [])
+                    manifest_commands = manifest.get("commands")
                     manifest_healthcheck = manifest.get("healthcheck_url")
             except Exception as e:
                 print(f"Manifest inspection failed: {e}")
 
         svc.repo_url = req.repo_url
         svc.flake = req.flake
-        if manifest_commands is not None:
+        if isinstance(manifest_commands, dict):
             svc.commands = manifest_commands
         if manifest_healthcheck is not None:
             svc.healthcheck_url = manifest_healthcheck
-        svc.env = node.env
         svc.triggered_by = req.triggered_by  # Audit
         
         db.commit()
@@ -471,7 +490,6 @@ async def list_services(
                 "name": s.name,
                 "status": s.status,
                 "node_name": s.node.name,
-                "environment": s.env,
             }
             for s in services
         ]
@@ -495,7 +513,6 @@ async def get_service_detail(
             "status": svc.status,
             "healthcheck_url": svc.healthcheck_url,
             "node": svc.node.name,
-            "env": svc.env,
         }
     finally:
         db.close()
@@ -516,34 +533,65 @@ async def deploy_all(
         
         op_ids = []
         for svc in services:
+            healthcheck_url = None
+            if svc.flake:
+                try:
+                    inspection = await send_agent_inspect(svc.node.host, svc.flake)
+                    if inspection.get("status") == "success":
+                        manifest = inspection.get("manifest", {})
+                        manifest_healthcheck = manifest.get("healthcheck_url")
+                        if manifest_healthcheck is not None:
+                            healthcheck_url = manifest_healthcheck
+                except Exception as e:
+                    print(f"Manifest inspection failed during deploy-all: {e}")
+
+            command_value, command_kind, command_error = resolve_command_flake(svc, "deploy")
             op_id = str(uuid.uuid4())
             op = Operation(
                 id=op_id,
                 type="deploy",
                 service_id=svc.id,
                 service_name=svc.name,
-                environment=svc.env,
                 version="latest",
                 triggered_by=triggered_by,
-                message="Queued (Bulk)",
+                status="failed" if command_error else "pending",
+                message=command_error or "Queued (Bulk)",
                 started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC) if command_error else None,
+                metadata_json={
+                    "repo_url": svc.repo_url,
+                    "flake": svc.flake,
+                    "commands": svc.commands,
+                    "command": "deploy",
+                    "command_flake": command_value if command_kind == "flake" else None,
+                    "healthcheck_url": healthcheck_url,
+                }
             )
             db.add(op)
             db.commit()
-            
+
+            if command_error:
+                op_ids.append(op_id)
+                continue
+
             # Use real node host
             node_host = svc.node.host
             # Create a dummy request for the background task
             req = DeployRequest(
                 service=svc.name,
                 version="latest",
-                environment=svc.env,
-                flake=svc.flake,
                 commands=svc.commands,
-                healthcheck_url=svc.healthcheck_url,
                 triggered_by=triggered_by
             )
-            background_tasks.add_task(run_deploy, op_id, req, node_host)
+            asyncio.create_task(run_command(
+                op_id,
+                req,
+                node_host,
+                healthcheck_url,
+                command_value,
+                "deploy",
+                command_kind,
+            ))
             op_ids.append(op_id)
             
         return DeployAllResponse(status="success", message=f"Queued {len(op_ids)} deployments.", operation_ids=op_ids)
@@ -558,26 +606,41 @@ async def deploy(
 ):
     db = SessionLocal()
     try:
+        # Try to infer from a declared service
+        svc = db.query(ServiceInstance).filter(ServiceInstance.name == req.service).first()
         if not req.node_name:
-            # Try to infer from a declared service
-            svc = db.query(ServiceInstance).filter(ServiceInstance.name == req.service).first()
             if not svc:
                 raise HTTPException(status_code=400, detail=f"Service '{req.service}' not declared. Please provide node_name.")
             req.node_name = svc.node.name
-            req.flake = req.flake or svc.flake
-            req.repo_url = req.repo_url or svc.repo_url
+        if svc:
             req.commands = req.commands or svc.commands
-            req.healthcheck_url = req.healthcheck_url or svc.healthcheck_url
 
         # Resolve node
         node = db.query(Node).filter(Node.name == req.node_name).first()
         if not node:
             raise HTTPException(status_code=404, detail=f"Node '{req.node_name}' not found")
         
+        flake = svc.flake if svc else None
+        if not flake:
+            raise HTTPException(status_code=400, detail=f"Service '{req.service}' has no flake configured. Declare the service with a flake first.")
+
+        healthcheck_url = None
+        if flake:
+            try:
+                inspection = await send_agent_inspect(node.host, flake)
+                if inspection.get("status") == "success":
+                    manifest = inspection.get("manifest", {})
+                    manifest_healthcheck = manifest.get("healthcheck_url")
+                    if manifest_healthcheck is not None:
+                        healthcheck_url = manifest_healthcheck
+            except Exception as e:
+                print(f"Manifest inspection failed during deploy: {e}")
+
+        command_value, command_kind, command_error = resolve_command_flake(svc, "deploy")
+        
         node_host = node.host
 
         # Link to service if found
-        svc = db.query(ServiceInstance).filter(ServiceInstance.name == req.service).first()
         svc_id = svc.id if svc else None
 
         # Clean up stale operations for this service
@@ -596,16 +659,19 @@ async def deploy(
             type="deploy",
             service_id=svc_id,
             service_name=req.service,
-            environment=req.environment,
             version=req.version,
             triggered_by=req.triggered_by,
-            message="Queued",
+            status="failed" if command_error else "pending",
+            message=command_error or "Queued",
             started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC) if command_error else None,
             metadata_json={
-                "repo_url": req.repo_url,
-                "flake": req.flake,
-                "commands": req.commands,
-                "healthcheck_url": req.healthcheck_url,
+                "repo_url": svc.repo_url if svc else None,
+                "flake": flake,
+                "commands": svc.commands if svc else None,
+                "command": "deploy",
+                "command_flake": command_value if command_kind == "flake" else None,
+                "healthcheck_url": healthcheck_url,
             }
         )
         db.add(op)
@@ -613,13 +679,96 @@ async def deploy(
     finally:
         db.close()
 
-    background_tasks.add_task(run_deploy, op_id, req, node_host)
+    if command_error:
+        return DeployResponse(
+            operation_id=op_id,
+            status="failed",
+            message=command_error,
+        )
+
+    asyncio.create_task(run_command(
+        op_id,
+        req,
+        node_host,
+        healthcheck_url,
+        command_value,
+        "deploy",
+        command_kind,
+    ))
     return DeployResponse(
         operation_id=op_id,
         status="pending",
         message=f"Deploy of {req.service}@{req.version} to {req.node_name} queued.",
     )
 
+
+# ── Endpoints: Command ───────────────────────────────────────────────────────
+
+@app.post("/command", response_model=CommandResponse, tags=["operations"])
+async def command(
+    req: CommandRequest,
+    background_tasks: BackgroundTasks,
+    _: str = Depends(verify_api_key),
+):
+    op_id = str(uuid.uuid4())
+    db = SessionLocal()
+    try:
+        svc = db.query(ServiceInstance).filter(ServiceInstance.name == req.service).first()
+        if not svc:
+            raise HTTPException(status_code=400, detail=f"Service '{req.service}' not declared.")
+        if not req.node_name:
+            req.node_name = svc.node.name
+
+        node = db.query(Node).filter(Node.name == req.node_name).first()
+        if not node:
+            raise HTTPException(status_code=404, detail=f"Node '{req.node_name}' not found")
+
+        command_value, command_kind, command_error = resolve_command_flake(svc, req.command)
+
+        op = Operation(
+            id=op_id,
+            type="command",
+            service_id=svc.id,
+            service_name=req.service,
+            triggered_by=req.triggered_by,
+            status="failed" if command_error else "pending",
+            message=command_error or "Queued",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC) if command_error else None,
+            metadata_json={
+                "repo_url": svc.repo_url,
+                "flake": svc.flake,
+                "commands": svc.commands,
+                "command": req.command,
+                "command_flake": command_value if command_kind == "flake" else None,
+            }
+        )
+        db.add(op)
+        db.commit()
+    finally:
+        db.close()
+
+    if command_error:
+        return CommandResponse(
+            operation_id=op_id,
+            status="failed",
+            message=command_error,
+        )
+
+    asyncio.create_task(run_command(
+        op_id,
+        DeployRequest(service=req.service, node_name=req.node_name),
+        node_host,
+        None,
+        command_value,
+        req.command,
+        command_kind,
+    ))
+    return CommandResponse(
+        operation_id=op_id,
+        status="pending",
+        message=f"Command '{req.command}' queued for {req.service}.",
+    )
 
 # ── Endpoints: Teardown ─────────────────────────────────────────────────────
 
@@ -633,23 +782,52 @@ async def teardown(
     db = SessionLocal()
     try:
         svc = db.query(ServiceInstance).filter(ServiceInstance.name == req.service).first()
-        env = svc.env if svc else "dev"
+        if not svc:
+            raise HTTPException(status_code=400, detail=f"Service '{req.service}' not declared.")
+
+        command_value, command_kind, command_error = resolve_command_flake(svc, "teardown")
+        node_host = svc.node.host
+
         op = Operation(
             id=op_id,
             type="teardown",
             service_id=svc.id if svc else None,
             service_name=req.service,
-            environment=env,
             triggered_by=req.triggered_by,
-            message="Queued",
+            status="failed" if command_error else "pending",
+            message=command_error or "Queued",
             started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC) if command_error else None,
+            metadata_json={
+                "repo_url": svc.repo_url if svc else None,
+                "flake": svc.flake if svc else None,
+                "commands": svc.commands if svc else None,
+                "command": "teardown",
+                "command_flake": command_value if command_kind == "flake" else None,
+                "command_exec": command_value if command_kind == "exec" else None,
+            }
         )
         db.add(op)
         db.commit()
     finally:
         db.close()
 
-    background_tasks.add_task(run_teardown, op_id, req)
+    if command_error:
+        return TeardownResponse(
+            operation_id=op_id,
+            status="failed",
+            message=command_error,
+        )
+
+    asyncio.create_task(run_command(
+        op_id,
+        req,
+        node_host,
+        None,
+        command_value,
+        "teardown",
+        command_kind,
+    ))
     return TeardownResponse(
         operation_id=op_id,
         status="pending",
@@ -674,7 +852,6 @@ async def rollback(
             type="rollback",
             service_id=svc.id if svc else None,
             service_name=req.service,
-            environment=req.environment,
             target_version=req.target_version,
             triggered_by=req.triggered_by,
             message="Queued",
@@ -685,11 +862,11 @@ async def rollback(
     finally:
         db.close()
 
-    background_tasks.add_task(run_rollback, op_id, req)
+    asyncio.create_task(run_rollback(op_id, req))
     return RollbackResponse(
         operation_id=op_id,
         status="pending",
-        message=f"Rollback of {req.service} to {req.target_version} in {req.environment} queued.",
+        message=f"Rollback of {req.service} to {req.target_version} queued.",
     )
 
 
@@ -730,7 +907,6 @@ async def list_operations(
                     "type": op.type,
                     "status": op.status,
                     "service": op.service_name,
-                    "environment": op.environment,
                     "version": op.version,
                     "target_version": op.target_version,
                     "message": op.message,
@@ -763,7 +939,6 @@ async def get_operation(
             type=op.type,
             status=op.status,
             service=op.service_name or "",
-            environment=op.environment or "",
             version=op.version,
             target_version=op.target_version,
             healthcheck_url=op.metadata_json.get("healthcheck_url") if op.metadata_json else None,
@@ -793,8 +968,7 @@ async def register_node(
             node = Node(
                 name=req.name,
                 uuid=req.uuid,
-                host=req.host,
-                env="dev"
+                host=req.host
             )
             db.add(node)
             message = f"Node '{req.name}' registered successfully."
@@ -821,7 +995,6 @@ async def get_nodes(
                 "name": n.name,
                 "uuid": n.uuid,
                 "host": n.host,
-                "env": n.env,
                 "status": n.status,
                 "fail_count": n.fail_count,
                 "last_seen": n.last_seen,

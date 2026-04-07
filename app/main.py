@@ -64,17 +64,16 @@ async def deploy(
         "status": "pending",
         "service": req.service,
         "version": req.version,
-        "environment": req.environment,
         "started_at": time.time(),
         "finished_at": None,
         "message": "Queued",
         "error": None,
     }
-    background_tasks.add_task(run_deploy, op_id, req)
+    background_tasks.add_task(run_deploy, op_id, req, None, None, None)
     return DeployResponse(
         operation_id=op_id,
         status="pending",
-        message=f"Deploy of {req.service}@{req.version} to {req.environment} queued.",
+        message=f"Deploy of {req.service}@{req.version} queued.",
     )
 
 
@@ -92,7 +91,6 @@ async def teardown(
         "type": "teardown",
         "status": "pending",
         "service": req.service,
-        "environment": req.environment,
         "started_at": time.time(),
         "finished_at": None,
         "message": "Queued",
@@ -102,7 +100,7 @@ async def teardown(
     return TeardownResponse(
         operation_id=op_id,
         status="pending",
-        message=f"Teardown of {req.service} in {req.environment} queued.",
+        message=f"Teardown of {req.service} queued.",
     )
 
 
@@ -121,7 +119,6 @@ async def rollback(
         "status": "pending",
         "service": req.service,
         "target_version": req.target_version,
-        "environment": req.environment,
         "started_at": time.time(),
         "finished_at": None,
         "message": "Queued",
@@ -131,7 +128,7 @@ async def rollback(
     return RollbackResponse(
         operation_id=op_id,
         status="pending",
-        message=f"Rollback of {req.service} to {req.target_version} in {req.environment} queued.",
+        message=f"Rollback of {req.service} to {req.target_version} queued.",
     )
 
 
