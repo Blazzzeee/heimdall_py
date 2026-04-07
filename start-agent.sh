@@ -8,6 +8,8 @@ echo "🚀 Starting Heimdall Agent Only..."
 AGENT_PORT=${HEIMDALL_AGENT_PORT:-8001}
 SESSION_NAME=${HEIMDALL_TMUX_SESSION:-heimdall-agent}
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TMUX_SOCK="${HEIMDALL_TMUX_SOCK:-$ROOT_DIR/.tmux/heimdall.sock}"
+mkdir -p "$(dirname "$TMUX_SOCK")"
 if [ -f "$ROOT_DIR/.env" ]; then
   set -a
   . "$ROOT_DIR/.env"
@@ -30,11 +32,7 @@ else
   exit 1
 fi
 
-if [ -x "${PYTHON_BIN%/python}/uvicorn" ]; then
-  UVICORN_BIN="${PYTHON_BIN%/python}/uvicorn"
-else
-  UVICORN_BIN="uvicorn"
-fi
+UVICORN_CMD=("$PYTHON_BIN" -m uvicorn)
 
 # --- Check tmux ---
 if ! command -v tmux >/dev/null 2>&1; then
@@ -65,18 +63,18 @@ export INFRA_API_URL="${INFRA_API_URL%/}"
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
 # --- Start tmux session ---
-tmux has-session -t "$SESSION_NAME" 2>/dev/null && tmux kill-session -t "$SESSION_NAME"
-tmux new-session -d -s "$SESSION_NAME" -n agent
+tmux -S "$TMUX_SOCK" has-session -t "$SESSION_NAME" 2>/dev/null && tmux -S "$TMUX_SOCK" kill-session -t "$SESSION_NAME"
+tmux -S "$TMUX_SOCK" new-session -d -s "$SESSION_NAME" -n agent
 
 echo "⚡ Starting agent on port $AGENT_PORT..."
 
-tmux send-keys -t "$SESSION_NAME:0" \
+tmux -S "$TMUX_SOCK" send-keys -t "$SESSION_NAME:0" \
   "cd \"$ROOT_DIR/fastapi_agent\"; \
    export INFRA_API_URL=\"$INFRA_API_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; \
-   $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/agent.log" C-m
+   ${UVICORN_CMD[*]} main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/agent.log" C-m
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✅ Agent running at: http://localhost:$AGENT_PORT"
-echo "📺 Attach: tmux attach -t $SESSION_NAME"
+echo "📺 Attach: tmux -S $TMUX_SOCK attach -t $SESSION_NAME"
 echo "🛑 Stop:   tmux kill-session -t $SESSION_NAME"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
