@@ -1,4 +1,4 @@
-# 🌌 heimdall
+# heimdall
 
 **Distributed Node Orchestration & Health Monitoring Platform**
 Instead of managing runtime state, Heimdall derives it: infra becomes a reproducible system graph evaluated across nodes. Operations become messaging (ChatOps as the control plane), failures are modeled and handled automatically, and recovery is built-in. It unifies provisioning, deployment, monitoring, and rollback with health-aware execution, structured debugging, and a REST API for live node state.
@@ -54,7 +54,6 @@ nix develop
 
 ```bash
 pip install -r requirements.txt
----
 ```
 ---
 
@@ -64,6 +63,7 @@ chmod +x ./start.sh
 ./start.sh && tmux attach -t heimdall
 ```
 
+#### While dealing with multiple machines , agent (slave nodes)
 ```bash
 chmod +x ./start-agent.sh
 ./start-agent.sh && tmux attach -t heimdall-agent
