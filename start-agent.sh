@@ -58,7 +58,7 @@ if [ -n "${INFRA_API_URL:-}" ]; then
 else
   export WEBHOOK_URL="http://localhost:8000/webhook"
 fi
-export WEBHOOK_SECRET="${INFRA_API_KEY:-super-secret-key}"
+export INFRA_API_KEY="${INFRA_API_KEY:-heimdall}"
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
 # --- Start tmux session ---
@@ -69,7 +69,7 @@ echo "⚡ Starting agent on port $AGENT_PORT..."
 
 tmux send-keys -t "$SESSION_NAME:0" \
   "cd \"$ROOT_DIR/fastapi_agent\"; \
-   export WEBHOOK_URL=\"$WEBHOOK_URL\" WEBHOOK_SECRET=\"$WEBHOOK_SECRET\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; \
+   export WEBHOOK_URL=\"$WEBHOOK_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; \
    $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/agent.log" C-m
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

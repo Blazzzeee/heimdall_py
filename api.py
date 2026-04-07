@@ -40,7 +40,7 @@ from app.models import (
 )
 from app.auth import verify_api_key
 from app.config import (
-    WEBHOOK_SECRET,
+    INFRA_API_KEY,
     WEBHOOK_TTL_SECONDS,
     FAIL_THRESHOLD,
     MONITOR_INTERVAL_SECONDS,
@@ -251,7 +251,7 @@ def verify_webhook_signature(payload: bytes, x_signature: str, x_timestamp: str 
         except ValueError:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook timestamp")
         message = payload.decode('utf-8') + x_timestamp
-        expected = hmac.new(WEBHOOK_SECRET.encode("utf-8"), message.encode('utf-8'), hashlib.sha256).hexdigest()
+        expected = hmac.new(INFRA_API_KEY.encode("utf-8"), message.encode('utf-8'), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, x_signature):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid agent webhook signature")
     else:
@@ -259,7 +259,7 @@ def verify_webhook_signature(payload: bytes, x_signature: str, x_timestamp: str 
         if not x_signature.startswith("sha256="):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid signature header")
         expected = x_signature.split("=", 1)[1]
-        mac = hmac.new(WEBHOOK_SECRET.encode("utf-8"), payload, hashlib.sha256)
+        mac = hmac.new(INFRA_API_KEY.encode("utf-8"), payload, hashlib.sha256)
         computed = mac.hexdigest()
         if not hmac.compare_digest(computed, expected):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid legacy webhook signature")

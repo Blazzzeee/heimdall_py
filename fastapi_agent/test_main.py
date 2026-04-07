@@ -2,7 +2,7 @@ import os
 import asyncio
 import pytest
 
-os.environ.setdefault("WEBHOOK_SECRET", "test-secret")
+os.environ.setdefault("INFRA_API_KEY", "test-secret")
 os.environ.setdefault("HEIMDALL_AGENT_DISABLE_BG", "1")
 
 from fastapi_agent.main import CommandRequest, receive_command, service_locks, service_state

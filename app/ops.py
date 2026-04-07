@@ -11,9 +11,9 @@ import time
 from datetime import datetime, UTC
 from db import SessionLocal, Operation
 from app.models import DeployRequest, TeardownRequest, RollbackRequest
-from app.config import WEBHOOK_SECRET
+from app.config import INFRA_API_KEY
 
-WEBHOOK_SECRET_BYTES = WEBHOOK_SECRET.encode()
+WEBHOOK_SECRET_BYTES = INFRA_API_KEY.encode()
 
 def _mark(op_id: str, status: str, message: str, error: str = None):
     db = SessionLocal()

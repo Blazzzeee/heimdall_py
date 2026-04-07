@@ -23,9 +23,9 @@ load_dotenv()
 logger = setup_logging("heimdall.agent")
 STATE_FILE = os.getenv("HEIMDALL_STATE_FILE", os.path.join(os.path.dirname(__file__), "state.json"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:8080/webhook")
-_secret_value = os.getenv("WEBHOOK_SECRET")
+_secret_value = os.getenv("INFRA_API_KEY")
 if not _secret_value:
-    raise RuntimeError("WEBHOOK_SECRET environment variable must be set for webhook signing.")
+    raise RuntimeError("INFRA_API_KEY environment variable must be set for webhook signing.")
 SECRET_KEY = _secret_value.encode()
 ALLOW_INSECURE_SIGNATURES = os.getenv("HEIMDALL_ALLOW_INSECURE_SIGNATURES", "").strip().lower() in {"1", "true", "yes"}
 DISABLE_BG_TASKS = os.getenv("HEIMDALL_AGENT_DISABLE_BG", "").strip().lower() in {"1", "true", "yes"}

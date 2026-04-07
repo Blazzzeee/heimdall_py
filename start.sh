@@ -60,7 +60,6 @@ sleep 1
 # Create a place to store logs
 mkdir -p logs
 
-export WEBHOOK_SECRET="super-secret-key"
 export INFRA_API_KEY="heimdall"
 export HEIMDALL_ENV="dev"
 export HEIMDALL_ALLOW_DEFAULTS="1"
@@ -80,7 +79,7 @@ tmux set-option -t "$SESSION_NAME" mouse on
 tmux set-option -t "$SESSION_NAME" monitor-activity on
 tmux set-option -t "$SESSION_NAME" visual-activity on
 
-tmux send-keys -t "$SESSION_NAME:0" "cd \"$ROOT_DIR\"; export WEBHOOK_SECRET=\"$WEBHOOK_SECRET\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_ENV=\"$HEIMDALL_ENV\" HEIMDALL_ALLOW_DEFAULTS=\"$HEIMDALL_ALLOW_DEFAULTS\" INFRA_API_URL=\"$INFRA_API_URL\" HEIMDALL_API_PORT=$HEIMDALL_API_PORT HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN api:app --host 0.0.0.0 --port $CTRL_PORT 2>&1 | tee logs/api.log" C-m
+tmux send-keys -t "$SESSION_NAME:0" "cd \"$ROOT_DIR\"; export INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_ENV=\"$HEIMDALL_ENV\" HEIMDALL_ALLOW_DEFAULTS=\"$HEIMDALL_ALLOW_DEFAULTS\" INFRA_API_URL=\"$INFRA_API_URL\" HEIMDALL_API_PORT=$HEIMDALL_API_PORT HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN api:app --host 0.0.0.0 --port $CTRL_PORT 2>&1 | tee logs/api.log" C-m
 
 echo "⏳ Waiting for Control Plane to be ready..."
 for i in {1..10}; do
@@ -133,7 +132,7 @@ echo ""
 echo "4. Starting fastapi_agent (Node Agent) on port $AGENT_PORT..."
 export WEBHOOK_URL="http://localhost:$CTRL_PORT/webhook"
 tmux new-window -t "$SESSION_NAME" -n agent
-tmux send-keys -t "$SESSION_NAME:1" "cd \"$ROOT_DIR/fastapi_agent\"; export WEBHOOK_URL=\"$WEBHOOK_URL\" WEBHOOK_SECRET=\"$WEBHOOK_SECRET\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/node.log" C-m
+tmux send-keys -t "$SESSION_NAME:1" "cd \"$ROOT_DIR/fastapi_agent\"; export WEBHOOK_URL=\"$WEBHOOK_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/node.log" C-m
 
 echo "5. Starting Discord Bot..."
 export SSL_CERT_FILE=$($PYTHON_BIN -m certifi)
