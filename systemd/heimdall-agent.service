@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/blazzee/Development/heimdall_py
 EnvironmentFile=/home/blazzee/Development/heimdall_py/.env
-ExecStart=/usr/bin/env bash -lc './start-agent.sh'
+Environment=PATH=/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/bin/bash -lc "./start-agent.sh"
 Restart=on-failure
 RestartSec=3
 
