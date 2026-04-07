@@ -8,6 +8,11 @@ echo "🚀 Starting Heimdall Agent Only..."
 AGENT_PORT=${HEIMDALL_AGENT_PORT:-8001}
 SESSION_NAME=${HEIMDALL_TMUX_SESSION:-heimdall-agent}
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$ROOT_DIR/.env" ]; then
+  set -a
+  . "$ROOT_DIR/.env"
+  set +a
+fi
 # --------------
 
 # --- Python resolution ---
@@ -48,7 +53,11 @@ mkdir -p logs
 touch logs/agent.log
 
 # --- Env ---
-export WEBHOOK_URL="http://localhost:8000/webhook"  # adjust if needed
+if [ -n "${INFRA_API_URL:-}" ]; then
+  export WEBHOOK_URL="${INFRA_API_URL%/}/webhook"
+else
+  export WEBHOOK_URL="http://localhost:8000/webhook"
+fi
 export WEBHOOK_SECRET="super-secret-key"
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
