@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/heimdall_py
-EnvironmentFile=%h/heimdall_py/.env
+EnvironmentFile=-%h/heimdall_py/.env
 Environment=PATH=/usr/bin:/bin:/usr/sbin:/sbin
-ExecStart=/bin/bash -lc "nix develop -c ./start.sh"
+ExecStart=/bin/bash -lc "cd %h/heimdall_py && nix develop -c ./start.sh"
 Restart=on-failure
 RestartSec=3
 
