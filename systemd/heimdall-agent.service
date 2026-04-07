@@ -1,0 +1,15 @@
+[Unit]
+Description=Heimdall Agent (./start-agent.sh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/blazzee/Development/heimdall_py
+EnvironmentFile=/home/blazzee/Development/heimdall_py/.env
+ExecStart=/usr/bin/env bash -lc './start-agent.sh'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
