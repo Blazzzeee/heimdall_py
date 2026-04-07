@@ -11,6 +11,7 @@ SVC_PORT=5000
 SESSION_NAME=${HEIMDALL_TMUX_SESSION:-heimdall}
 TMUX_HISTORY=${HEIMDALL_TMUX_HISTORY:-10000}
 TMUX_STATUS=${HEIMDALL_TMUX_STATUS:-on}
+PROD=${PROD:-false}
 # --------------
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -99,24 +100,28 @@ if not node:
 db.close()
 '
 
-echo "3. Registering 'service-1' and 'worker-1' via API curl..."
-curl -sS -X POST http://127.0.0.1:$CTRL_PORT/services \
-  -H "X-API-Key: heimdall" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "service": "service-1",
-    "node_name": "local-agent",
-    "flake": "path:'"$PWD"'/examples/api_service"
-  }' > /dev/null
+if [[ "${PROD,,}" == "true" ]]; then
+  echo "3. Skipping dummy service registration (PROD=true)."
+else
+  echo "3. Registering 'service-1' and 'worker-1' via API curl..."
+  curl -sS -X POST http://127.0.0.1:$CTRL_PORT/services \
+    -H "X-API-Key: heimdall" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "service": "service-1",
+      "node_name": "local-agent",
+      "flake": "path:'"$PWD"'/examples/api_service"
+    }' > /dev/null
 
-curl -sS -X POST http://127.0.0.1:$CTRL_PORT/services \
-  -H "X-API-Key: heimdall" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "service": "worker-1",
-    "node_name": "local-agent",
-    "flake": "path:'"$PWD"'/examples/worker_service"
-  }' > /dev/null
+  curl -sS -X POST http://127.0.0.1:$CTRL_PORT/services \
+    -H "X-API-Key: heimdall" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "service": "worker-1",
+      "node_name": "local-agent",
+      "flake": "path:'"$PWD"'/examples/worker_service"
+    }' > /dev/null
+fi
 
 echo ""
 
