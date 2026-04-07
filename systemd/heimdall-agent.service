@@ -1,16 +1,17 @@
 [Unit]
-Description=Heimdall Agent (./start-agent.sh)
+Description=Heimdall Agent (tmux wrapper)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
 WorkingDirectory=%h/heimdall_py
 EnvironmentFile=-%h/heimdall_py/.env
 Environment=PATH=/usr/bin:/bin:/usr/sbin:/sbin
 ExecStart=/bin/bash -lc "%h/heimdall_py/start-agent.sh"
-Restart=on-failure
-RestartSec=3
+ExecStop=/usr/bin/tmux kill-session -t heimdall-agent
+RemainAfterExit=yes
+KillMode=none
 
 [Install]
 WantedBy=default.target
