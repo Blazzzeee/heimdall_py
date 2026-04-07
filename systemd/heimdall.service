@@ -1,16 +1,17 @@
 [Unit]
-Description=Heimdall Control Plane (nix develop -c ./start.sh)
+Description=Heimdall Control Plane (tmux wrapper)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
 WorkingDirectory=%h/heimdall_py
 EnvironmentFile=-%h/heimdall_py/.env
 Environment=PATH=/usr/bin:/bin:/usr/sbin:/sbin
-ExecStart=/bin/bash -lc "cd %h/heimdall_py && nix develop -c ./start.sh"
-Restart=on-failure
-RestartSec=3
+ExecStart=/bin/bash -lc "%h/heimdall_py/start.sh"
+ExecStop=/usr/bin/tmux kill-session -t heimdall
+RemainAfterExit=yes
+KillMode=none
 
 [Install]
 WantedBy=default.target
