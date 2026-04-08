@@ -299,3 +299,102 @@ def test_nodes_endpoint():
     r = client.get("/nodes", headers=API_KEY_HEADER)
     assert r.status_code == 200
     assert any(n["name"] == "n1" for n in r.json())
+
+def test_command_deploy_success():
+    db = SessionLocal()
+    node = Node(name = "cmd-node", uuid="cmd-uuid", host = "http://localhost:8001")
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    db.add(ServiceInstance(
+        node_id = node.id,
+        name = "cmd-svc",
+        service_uuid = "cmd-svc",
+        flake = "github:org/repo#app",
+        commands = {"deploy":"default"},
+    ))
+    db.commit()
+    db.close()
+
+    r = client.post("/command", json={
+        "service":"cmd-svc",
+        "command":"deploy",
+    },headers = API_KEY_HEADER)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "pending"
+    assert "operation_id" in data
+
+    db = SessionLocal()
+    op = db.query(Operation).filter_by(id=data["operation_id"]).first()
+    assert op is not None
+    assert op.type == "command"
+    assert op.service_name =="cmd-svc"
+    assert op.metadata_json["command"] == "deploy"
+    assert op.metadata_json["command_flake"] is not None
+    db.close()
+
+def test_command_missing_in_manifest():
+    db = SessionLocal()
+    node = Node(name = "cmd-node2", uuid = "cmd-uuid2", host = "http://localhost:8001")
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    db.add(ServiceInstance(
+        node_id=node.id,
+        name="cmd-svc2",
+        service_uuid="cmd-svc2",
+        flake="github:org/repo#app",
+        commands={"deploy": "default"}, 
+    ))
+    db.commit()
+    db.close()
+
+    r = client.post("/command", json={
+        "service": "cmd-svc2",
+        "command": "ci",
+    }, headers=API_KEY_HEADER)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "failed"
+    assert "ci" in data["message"]
+
+    db = SessionLocal()
+    op = db.query(Operation).filter_by(id=data["operation_id"]).first()
+    assert op is not None
+    assert op.status == "failed"
+    assert op.finished_at is not None
+    db.close()
+
+def test_teardown_uses_command_path():
+    db = SessionLocal()
+    node = Node(name="td-cmd-node", uuid="td-cmd-uuid", host="http://localhost:8009")
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    db.add(ServiceInstance(
+        node_id=node.id,
+        name="td-cmd-svc",
+        service_uuid="td-cmd-svc",
+        flake="github:org/repo#app",
+        commands={"teardown": "stop"},
+    ))
+    db.commit()
+    db.close()
+    r = client.post("/teardown", json={
+        "service": "td-cmd-svc",
+    }, headers=API_KEY_HEADER)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "pending"
+    assert "operation_id" in data
+    
+    db = SessionLocal()
+    op = db.query(Operation).filter_by(id=data["operation_id"]).first()
+    assert op is not None
+    assert op.type == "teardown"
+    assert op.metadata_json["command"] == "teardown"
+    assert op.metadata_json["command_flake"] is not None
+    db.close()
+
+
