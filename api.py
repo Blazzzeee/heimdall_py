@@ -25,10 +25,12 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from threading import Lock
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, BackgroundTasks, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
+
+load_dotenv()
 
 from db import SessionLocal, Node, ServiceInstance, Operation, init_db
 from app.models import (
@@ -55,7 +57,6 @@ from app.ops import run_deploy, run_rollback, run_command, send_agent_inspect
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-load_dotenv()
 logger = setup_logging("heimdall.api")
 _op_update_lock = Lock()
 
@@ -521,7 +522,6 @@ async def get_service_detail(
 
 @app.post("/deploy-all", response_model=DeployAllResponse, tags=["operations"])
 async def deploy_all(
-    background_tasks: BackgroundTasks,
     triggered_by: str = None,
     _: str = Depends(verify_api_key),
 ):
@@ -601,7 +601,6 @@ async def deploy_all(
 @app.post("/deploy", response_model=DeployResponse, tags=["operations"])
 async def deploy(
     req: DeployRequest,
-    background_tasks: BackgroundTasks,
     _: str = Depends(verify_api_key),
 ):
     db = SessionLocal()
@@ -707,7 +706,6 @@ async def deploy(
 @app.post("/command", response_model=CommandResponse, tags=["operations"])
 async def command(
     req: CommandRequest,
-    background_tasks: BackgroundTasks,
     _: str = Depends(verify_api_key),
 ):
     op_id = str(uuid.uuid4())
@@ -724,6 +722,17 @@ async def command(
             raise HTTPException(status_code=404, detail=f"Node '{req.node_name}' not found")
 
         command_value, command_kind, command_error = resolve_command_flake(svc, req.command)
+        logger.info(
+        "resolved_command_flake",
+        extra={
+           "service": req.service,
+           "command": req.command,
+           "command_flake": command_value,
+           "command_kind": command_kind,
+           "error": command_error,
+            },
+        )
+        node_host = node.host
 
         op = Operation(
             id=op_id,
@@ -775,7 +784,6 @@ async def command(
 @app.post("/teardown", response_model=TeardownResponse, tags=["operations"])
 async def teardown(
     req: TeardownRequest,
-    background_tasks: BackgroundTasks,
     _: str = Depends(verify_api_key),
 ):
     op_id = str(uuid.uuid4())
@@ -787,6 +795,7 @@ async def teardown(
 
         command_value, command_kind, command_error = resolve_command_flake(svc, "teardown")
         node_host = svc.node.host
+        node_name = svc.node.name
 
         op = Operation(
             id=op_id,
@@ -821,7 +830,7 @@ async def teardown(
 
     asyncio.create_task(run_command(
         op_id,
-        req,
+        DeployRequest(service=req.service, node_name=node_name),
         node_host,
         None,
         command_value,
@@ -840,7 +849,6 @@ async def teardown(
 @app.post("/rollback", response_model=RollbackResponse, tags=["operations"])
 async def rollback(
     req: RollbackRequest,
-    background_tasks: BackgroundTasks,
     _: str = Depends(verify_api_key),
 ):
     op_id = str(uuid.uuid4())
