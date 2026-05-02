@@ -10,6 +10,8 @@ import ssl
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+import json
+from pathlib import Path
 
 # Ultimate SSL Fix for restricted environments
 try:
@@ -22,6 +24,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 API_URL       = os.getenv("INFRA_API_URL", "http://localhost:8000")
 API_KEY       = os.getenv("INFRA_API_KEY")
+ALERT_POLL_SECONDS = float(os.getenv("HEIMDALL_ALERT_POLL_SECONDS", "10"))
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is not set.")
@@ -41,6 +44,40 @@ tree = bot.tree
 # aiohttp's default timeout is quite long, which can make the bot *look* frozen.
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
 _http: aiohttp.ClientSession | None = None
+_alert_task: asyncio.Task | None = None
+_last_service_status: dict[str, str] = {}
+_last_node_status: dict[str, str] = {}
+_alert_channel_id: int | None = None
+
+_ALERT_CFG_PATH = Path(__file__).with_name("alert_config.json")
+
+def _load_alert_channel_id() -> int | None:
+    # Prefer config file; fall back to env for backwards compatibility.
+    try:
+        if _ALERT_CFG_PATH.exists():
+            data = json.loads(_ALERT_CFG_PATH.read_text(encoding="utf-8"))
+            cid = data.get("channel_id")
+            if isinstance(cid, int):
+                return cid
+            if isinstance(cid, str) and cid.isdigit():
+                return int(cid)
+    except Exception:
+        pass
+    env = os.getenv("HEIMDALL_ALERT_CHANNEL_ID")
+    if env and env.isdigit():
+        return int(env)
+    return None
+
+def _save_alert_channel_id(channel_id: int | None) -> None:
+    try:
+        if channel_id is None:
+            if _ALERT_CFG_PATH.exists():
+                _ALERT_CFG_PATH.unlink()
+            return
+        _ALERT_CFG_PATH.write_text(json.dumps({"channel_id": int(channel_id)}, indent=2) + "\n", encoding="utf-8")
+    except Exception as e:
+        # Don't crash the bot if the FS is read-only, etc.
+        print(f"Failed to write alert config: {e}")
 
 # ── Helpers (Basic) ───────────────────────────────────────────────────────────
 
@@ -61,6 +98,71 @@ async def api_get(path: str) -> dict:
     async with _http.get(f"{API_URL}{path}", headers=HEADERS) as r:
         r.raise_for_status()
         return await r.json()
+
+async def _get_alert_channel() -> discord.abc.Messageable | None:
+    if _alert_channel_id is None:
+        return None
+    ch = bot.get_channel(_alert_channel_id)
+    if ch is not None:
+        return ch
+    try:
+        return await bot.fetch_channel(_alert_channel_id)
+    except Exception:
+        return None
+
+async def alert_monitor_loop():
+    """
+    Poll the control plane and announce when a node goes OFFLINE or a service becomes dead.
+    This is intentionally polling-based so it works even if the control plane doesn't push events.
+    """
+    await bot.wait_until_ready()
+    channel = await _get_alert_channel()
+    if channel is None:
+        return
+
+    while not bot.is_closed():
+        try:
+            # Nodes
+            nodes = await api_get("/nodes")
+            for n in nodes:
+                name = n.get("name", "?")
+                status = n.get("status", "UNKNOWN")
+                prev = _last_node_status.get(name)
+                _last_node_status[name] = status
+                if prev is not None and prev != status and status == "OFFLINE":
+                    await channel.send(f"🔴 Node OFFLINE: `{name}`")
+
+            # Services
+            services = await api_get("/services")
+            for s in services:
+                name = s.get("name", "?")
+                status = s.get("status", "unknown")
+                node_name = s.get("node_name", "—")
+                prev = _last_service_status.get(name)
+                _last_service_status[name] = status
+                if prev is not None and prev != status and status == "dead":
+                    await channel.send(f"🔴 Service DEAD: `{name}` on node `{node_name}`")
+        except Exception as e:
+            # Avoid killing the bot for transient API/network failures.
+            print(f"alert_monitor_loop error: {e}")
+        await asyncio.sleep(ALERT_POLL_SECONDS)
+
+async def _restart_alert_task():
+    global _alert_task
+    if _alert_task is not None:
+        _alert_task.cancel()
+        try:
+            await _alert_task
+        except asyncio.CancelledError:
+            pass
+        _alert_task = None
+
+    # Reset state on (re)start to prevent spam from old baselines.
+    _last_service_status.clear()
+    _last_node_status.clear()
+
+    if _alert_channel_id is not None:
+        _alert_task = asyncio.create_task(alert_monitor_loop())
 
 async def send_error_embed(interaction: discord.Interaction, error: str):
     embed = discord.Embed(title="❌ Heimdall API — Error", description=f"```{error}```", color=discord.Color.red())
@@ -316,6 +418,33 @@ async def cmd_audit(interaction: discord.Interaction, limit: int = 15):
         await interaction.followup.send(embed=embed)
     except Exception as e: await send_error_embed(interaction, str(e))
 
+@tree.command(name="alerts", description="Configure where Heimdall posts down-alerts (node OFFLINE / service dead).")
+@app_commands.describe(channel="Channel to post alerts to (omit to use this channel)")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def cmd_alerts(interaction: discord.Interaction, channel: discord.TextChannel | None = None):
+    await safe_defer(interaction)
+    target = channel or interaction.channel
+    if not isinstance(target, discord.TextChannel):
+        await interaction.followup.send("This command must be used in a server text channel (or specify one).")
+        return
+
+    global _alert_channel_id
+    _alert_channel_id = target.id
+    _save_alert_channel_id(_alert_channel_id)
+    await _restart_alert_task()
+    await interaction.followup.send(f"Alerts channel set to {target.mention}.")
+
+@cmd_alerts.error
+async def cmd_alerts_error(interaction: discord.Interaction, error: Exception):
+    # Keep error handling simple and user-friendly.
+    if isinstance(error, app_commands.MissingPermissions):
+        if not interaction.response.is_done():
+            await interaction.response.send_message("Missing permission: Manage Server.", ephemeral=True)
+        else:
+            await interaction.followup.send("Missing permission: Manage Server.", ephemeral=True)
+        return
+    raise error
+
 @tree.command(name="add-node", description="Alias for /register-node.")
 @app_commands.describe(name="Display name", node_id="Unique ID", host="Agent URL")
 async def cmd_add_node(interaction: discord.Interaction, name: str, node_id: str, host: str):
@@ -331,6 +460,9 @@ async def setup_hook():
     global _http
     _http = aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
     await tree.sync()
+    global _alert_channel_id
+    _alert_channel_id = _load_alert_channel_id()
+    await _restart_alert_task()
 
 @bot.event
 async def on_ready():
