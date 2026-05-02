@@ -45,7 +45,7 @@ _http: aiohttp.ClientSession | None = None
 # ── Helpers (Basic) ───────────────────────────────────────────────────────────
 
 def status_emoji(status: str) -> str:
-    return {"pending": "⏳", "running": "🔄", "success": "✅", "failed": "❌", "booting": "🟡", "healthy": "🟢"}.get(status, "❓")
+    return {"pending": "⏳", "running": "🔄", "success": "✅", "failed": "❌", "booting": "🟡", "healthy": "🟢", "dead": "🔴"}.get(status, "❓")
 
 def node_emoji(status: str) -> str:
     return {"ONLINE": "🟢", "OFFLINE": "🔴"}.get(status, "⚪")

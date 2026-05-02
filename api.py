@@ -222,6 +222,7 @@ async def check_node(node_id: str):
         node = db.query(Node).filter(Node.id == node_id).first()
         if not node:
             return
+        prev_status = node.status
 
         try:
             async with httpx.AsyncClient(timeout=HEARTBEAT_TIMEOUT_SECONDS) as client:
@@ -238,6 +239,13 @@ async def check_node(node_id: str):
         node.fail_count += 1
         if node.fail_count >= FAIL_THRESHOLD:
             node.status = "OFFLINE"
+            # If the node is unreachable, any service status from the agent is stale.
+            # Mark services as dead so UIs (Discord, etc.) stop showing "healthy".
+            if prev_status != "OFFLINE":
+                db.query(ServiceInstance).filter(ServiceInstance.node_id == node.id).update(
+                    {ServiceInstance.status: "dead"},
+                    synchronize_session=False,
+                )
         db.commit()
     finally:
         db.close()

@@ -32,10 +32,12 @@ if not _secret_value:
 SECRET_KEY = _secret_value.encode()
 ALLOW_INSECURE_SIGNATURES = os.getenv("HEIMDALL_ALLOW_INSECURE_SIGNATURES", "").strip().lower() in {"1", "true", "yes"}
 DISABLE_BG_TASKS = os.getenv("HEIMDALL_AGENT_DISABLE_BG", "").strip().lower() in {"1", "true", "yes"}
+HEALTHCHECK_FAILSAFE = int(os.getenv("HEALTHCHECK_FAILSAFE", "3"))
 
 # State dictionaries
 service_state = {}
 service_locks = {}
+health_fail_counts = {}  # svc -> consecutive healthcheck failures
 
 webhook_client: httpx.AsyncClient = None
 
@@ -86,6 +88,7 @@ async def health_check_loop():
                 pid = data.get("pid")
                 health_url = data.get("health_url")
                 status = None
+                had_healthcheck_failure = False
 
                 if pid:
                     try:
@@ -101,9 +104,31 @@ async def health_check_loop():
                             if res.status_code == 200:
                                 status = "healthy"
                             else:
-                                status = "unhealthy"
+                                had_healthcheck_failure = True
                     except Exception:
-                        status = "unhealthy"
+                        had_healthcheck_failure = True
+
+                # If we have a healthcheck URL, treat consecutive failures as "dead"
+                # only after HEALTHCHECK_FAILSAFE trips. Before that we keep the
+                # previously-known status to avoid flapping on transient errors.
+                if health_url:
+                    if had_healthcheck_failure:
+                        health_fail_counts[svc] = health_fail_counts.get(svc, 0) + 1
+                        if health_fail_counts[svc] >= HEALTHCHECK_FAILSAFE:
+                            status = "dead"
+                        else:
+                            status = None
+                    else:
+                        # success: reset failure counter
+                        if health_fail_counts.get(svc):
+                            health_fail_counts[svc] = 0
+
+                # If pid is dead, force status dead regardless of healthcheck.
+                if pid and status is None:
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        status = "dead"
 
                 if status and data.get("status") != status:
                     service_state[svc]["status"] = status
