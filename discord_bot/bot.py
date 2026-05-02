@@ -37,6 +37,11 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
+# Avoid hanging interactions indefinitely when the API is down or DNS is flaky.
+# aiohttp's default timeout is quite long, which can make the bot *look* frozen.
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
+_http: aiohttp.ClientSession | None = None
+
 # ── Helpers (Basic) ───────────────────────────────────────────────────────────
 
 def status_emoji(status: str) -> str:
@@ -46,16 +51,16 @@ def node_emoji(status: str) -> str:
     return {"ONLINE": "🟢", "OFFLINE": "🔴"}.get(status, "⚪")
 
 async def api_post(path: str, payload: dict) -> dict:
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{API_URL}{path}", json=payload, headers=HEADERS) as r:
-            r.raise_for_status()
-            return await r.json()
+    assert _http is not None
+    async with _http.post(f"{API_URL}{path}", json=payload, headers=HEADERS) as r:
+        r.raise_for_status()
+        return await r.json()
 
 async def api_get(path: str) -> dict:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{API_URL}{path}", headers=HEADERS) as r:
-            r.raise_for_status()
-            return await r.json()
+    assert _http is not None
+    async with _http.get(f"{API_URL}{path}", headers=HEADERS) as r:
+        r.raise_for_status()
+        return await r.json()
 
 async def send_error_embed(interaction: discord.Interaction, error: str):
     embed = discord.Embed(title="❌ Heimdall API — Error", description=f"```{error}```", color=discord.Color.red())
@@ -318,9 +323,23 @@ async def cmd_add_node(interaction: discord.Interaction, name: str, node_id: str
     await cmd_node_register(interaction, name, node_id, host)
 
 @bot.event
-async def on_ready():
+async def setup_hook():
+    """
+    discord.py docs recommend doing async setup here (called once) instead of
+    in on_ready() (which can run multiple times due to reconnect/resume).
+    """
+    global _http
+    _http = aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
     await tree.sync()
+
+@bot.event
+async def on_ready():
     print(f"Heimdall bot ready: {bot.user}")
+
+@bot.event
+async def on_disconnect():
+    # Helpful when running headless under systemd; shows when the gateway drops.
+    print("Discord gateway disconnected; discord.py will attempt to reconnect.")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)

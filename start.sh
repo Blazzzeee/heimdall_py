@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
 echo "🛡️  Booting Heimdall Ecosystem..."
 
@@ -8,6 +8,7 @@ echo "🛡️  Booting Heimdall Ecosystem..."
 CTRL_PORT=8000
 AGENT_PORT=8001
 SVC_PORT=5000
+USE_TMUX=${TMUX:-0}  # set TMUX=1 to run everything inside a tmux session
 SESSION_NAME=${HEIMDALL_TMUX_SESSION:-heimdall}
 TMUX_HISTORY=${HEIMDALL_TMUX_HISTORY:-10000}
 TMUX_STATUS=${HEIMDALL_TMUX_STATUS:-on}
@@ -41,11 +42,6 @@ else
   UVICORN_BIN="uvicorn"
 fi
 
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "❌ tmux is required. Install tmux and retry."
-  exit 1
-fi
-
 echo "0. Cleaning up previous running instances (Ports $CTRL_PORT, $AGENT_PORT, $SVC_PORT)..."
 fuser -k $CTRL_PORT/tcp 2>/dev/null || true
 fuser -k $AGENT_PORT/tcp 2>/dev/null || true
@@ -60,6 +56,8 @@ sleep 1
 # Create a place to store logs
 mkdir -p logs
 
+touch logs/api.log logs/node.log logs/bot.log
+
 if [ -z "${INFRA_API_KEY:-}" ]; then
   echo "❌ INFRA_API_KEY is required. Set it in .env or export it before running."
   exit 1
@@ -73,19 +71,56 @@ export INFRA_API_URL="${INFRA_API_URL%/}"
 export HEIMDALL_API_PORT=$CTRL_PORT
 export HEIMDALL_AGENT_PORT=$AGENT_PORT
 
-echo "1. Starting tmux session '$SESSION_NAME'..."
-tmux has-session -t "$SESSION_NAME" 2>/dev/null && tmux kill-session -t "$SESSION_NAME"
-tmux new-session -d -s "$SESSION_NAME" -n control
+run_tmux() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "❌ tmux is required when TMUX=1. Install tmux and retry."
+    exit 1
+  fi
 
-touch logs/api.log logs/node.log logs/bot.log
+  echo "1. Starting tmux session '$SESSION_NAME'..."
+  tmux has-session -t "$SESSION_NAME" 2>/dev/null && tmux kill-session -t "$SESSION_NAME"
+  tmux new-session -d -s "$SESSION_NAME" -n control
 
-tmux set-option -t "$SESSION_NAME" history-limit "$TMUX_HISTORY"
-tmux set-option -t "$SESSION_NAME" status "$TMUX_STATUS"
-tmux set-option -t "$SESSION_NAME" mouse on
-tmux set-option -t "$SESSION_NAME" monitor-activity on
-tmux set-option -t "$SESSION_NAME" visual-activity on
+  tmux set-option -t "$SESSION_NAME" history-limit "$TMUX_HISTORY"
+  tmux set-option -t "$SESSION_NAME" status "$TMUX_STATUS"
+  tmux set-option -t "$SESSION_NAME" mouse on
+  tmux set-option -t "$SESSION_NAME" monitor-activity on
+  tmux set-option -t "$SESSION_NAME" visual-activity on
 
-tmux send-keys -t "$SESSION_NAME:0" "cd \"$ROOT_DIR\"; export INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_ALLOW_DEFAULTS=\"$HEIMDALL_ALLOW_DEFAULTS\" INFRA_API_URL=\"$INFRA_API_URL\" HEIMDALL_API_PORT=$HEIMDALL_API_PORT HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN api:app --host 0.0.0.0 --port $CTRL_PORT 2>&1 | tee logs/api.log" C-m
+  tmux send-keys -t "$SESSION_NAME:0" \
+    "cd \"$ROOT_DIR\"; \
+     export INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_ALLOW_DEFAULTS=\"$HEIMDALL_ALLOW_DEFAULTS\" INFRA_API_URL=\"$INFRA_API_URL\" HEIMDALL_API_PORT=$HEIMDALL_API_PORT HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; \
+     \"$UVICORN_BIN\" api:app --host 0.0.0.0 --port $CTRL_PORT 2>&1 | tee logs/api.log" C-m
+}
+
+run_no_tmux() {
+  API_PID=""
+  AGENT_PID=""
+  BOT_PID=""
+
+  cleanup() {
+    # Best-effort shutdown when the script is stopped (e.g. systemd stop).
+    if [ -n "${BOT_PID:-}" ] && kill -0 "$BOT_PID" 2>/dev/null; then kill "$BOT_PID" 2>/dev/null || true; fi
+    if [ -n "${AGENT_PID:-}" ] && kill -0 "$AGENT_PID" 2>/dev/null; then kill "$AGENT_PID" 2>/dev/null || true; fi
+    if [ -n "${API_PID:-}" ] && kill -0 "$API_PID" 2>/dev/null; then kill "$API_PID" 2>/dev/null || true; fi
+    wait 2>/dev/null || true
+  }
+  trap cleanup INT TERM EXIT
+
+  echo "1. Starting Control Plane on port $CTRL_PORT..."
+  (
+    cd "$ROOT_DIR"
+    export INFRA_API_KEY="$INFRA_API_KEY" HEIMDALL_ALLOW_DEFAULTS="$HEIMDALL_ALLOW_DEFAULTS" INFRA_API_URL="$INFRA_API_URL" HEIMDALL_API_PORT="$HEIMDALL_API_PORT" HEIMDALL_AGENT_PORT="$HEIMDALL_AGENT_PORT"
+    exec "$UVICORN_BIN" api:app --host 0.0.0.0 --port "$CTRL_PORT"
+  ) >>logs/api.log 2>&1 &
+  API_PID="$!"
+}
+
+if [[ "${USE_TMUX}" == "1" ]]; then
+  run_tmux
+else
+  run_no_tmux
+fi
 
 echo "⏳ Waiting for Control Plane to be ready..."
 for i in {1..10}; do
@@ -136,20 +171,44 @@ fi
 echo ""
 
 echo "4. Starting fastapi_agent (Node Agent) on port $AGENT_PORT..."
-tmux new-window -t "$SESSION_NAME" -n agent
-tmux send-keys -t "$SESSION_NAME:1" "cd \"$ROOT_DIR/fastapi_agent\"; export INFRA_API_URL=\"$INFRA_API_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; $UVICORN_BIN main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/node.log" C-m
+if [[ "${USE_TMUX}" == "1" ]]; then
+  tmux new-window -t "$SESSION_NAME" -n agent
+  tmux send-keys -t "$SESSION_NAME:1" \
+    "cd \"$ROOT_DIR/fastapi_agent\"; \
+     export INFRA_API_URL=\"$INFRA_API_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\" HEIMDALL_AGENT_PORT=$HEIMDALL_AGENT_PORT; \
+     \"$UVICORN_BIN\" main:app --host 0.0.0.0 --port $AGENT_PORT 2>&1 | tee ../logs/node.log" C-m
+else
+  (
+    cd "$ROOT_DIR/fastapi_agent"
+    export INFRA_API_URL="$INFRA_API_URL" INFRA_API_KEY="$INFRA_API_KEY" HEIMDALL_AGENT_PORT="$HEIMDALL_AGENT_PORT"
+    exec "$UVICORN_BIN" main:app --host 0.0.0.0 --port "$AGENT_PORT"
+  ) >>logs/node.log 2>&1 &
+  AGENT_PID="$!"
+fi
 
 echo "5. Starting Discord Bot..."
 export SSL_CERT_FILE=$($PYTHON_BIN -m certifi)
-tmux new-window -t "$SESSION_NAME" -n bot
-tmux send-keys -t "$SESSION_NAME:2" "cd \"$ROOT_DIR\"; export SSL_CERT_FILE=\"$SSL_CERT_FILE\" INFRA_API_URL=\"$INFRA_API_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\"; $PYTHON_BIN discord_bot/bot.py 2>&1 | tee logs/bot.log" C-m
+if [[ "${USE_TMUX}" == "1" ]]; then
+  tmux new-window -t "$SESSION_NAME" -n bot
+  tmux send-keys -t "$SESSION_NAME:2" \
+    "cd \"$ROOT_DIR\"; \
+     export SSL_CERT_FILE=\"$SSL_CERT_FILE\" INFRA_API_URL=\"$INFRA_API_URL\" INFRA_API_KEY=\"$INFRA_API_KEY\"; \
+     \"$PYTHON_BIN\" discord_bot/bot.py 2>&1 | tee logs/bot.log" C-m
 
-tmux new-window -t "$SESSION_NAME" -n logs
-tmux send-keys -t "$SESSION_NAME:3" "cd \"$ROOT_DIR\"; tail -n 200 -f logs/api.log" C-m
-tmux split-window -t "$SESSION_NAME:3" -h
-tmux send-keys -t "$SESSION_NAME:3.1" "cd \"$ROOT_DIR\"; tail -n 200 -f logs/node.log" C-m
-tmux split-window -t "$SESSION_NAME:3" -v
-tmux send-keys -t "$SESSION_NAME:3.2" "cd \"$ROOT_DIR\"; tail -n 200 -f logs/bot.log" C-m
+  tmux new-window -t "$SESSION_NAME" -n logs
+  tmux send-keys -t "$SESSION_NAME:3" "cd \"$ROOT_DIR\"; tail -n 200 -f logs/api.log" C-m
+  tmux split-window -t "$SESSION_NAME:3" -h
+  tmux send-keys -t "$SESSION_NAME:3.1" "cd \"$ROOT_DIR\"; tail -n 200 -f logs/node.log" C-m
+  tmux split-window -t "$SESSION_NAME:3" -v
+  tmux send-keys -t "$SESSION_NAME:3.2" "cd \"$ROOT_DIR\"; tail -n 200 -f logs/bot.log" C-m
+else
+  (
+    cd "$ROOT_DIR"
+    export SSL_CERT_FILE="$SSL_CERT_FILE" INFRA_API_URL="$INFRA_API_URL" INFRA_API_KEY="$INFRA_API_KEY"
+    exec "$PYTHON_BIN" discord_bot/bot.py
+  ) >>logs/bot.log 2>&1 &
+  BOT_PID="$!"
+fi
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✅ Heimdall Infrastructure Ecosystem is UP!"
@@ -157,6 +216,21 @@ echo "   - Control Plane: http://localhost:$CTRL_PORT"
 echo "   - Node Agent:    http://localhost:$AGENT_PORT"
 echo "   - Discord Bot:   Active"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Attach to logs: tmux attach -t $SESSION_NAME"
-echo "Stop everything: tmux kill-session -t $SESSION_NAME"
+echo "Logs:"
+echo "  - logs/api.log"
+echo "  - logs/node.log"
+echo "  - logs/bot.log"
 echo ""
+
+if [[ "${USE_TMUX}" == "1" ]]; then
+  echo "Attach to logs: tmux attach -t $SESSION_NAME"
+  echo "Stop everything: tmux kill-session -t $SESSION_NAME"
+  echo ""
+  exit 0
+fi
+
+# No-tmux mode: keep the script alive so systemd can supervise it (Type=simple).
+# If any process exits, stop the rest (via trap) and return non-zero.
+wait -n "$API_PID" "$AGENT_PID" "$BOT_PID"
+echo "❌ A component exited; shutting down the rest."
+exit 1
