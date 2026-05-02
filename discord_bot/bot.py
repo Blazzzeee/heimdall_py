@@ -50,6 +50,10 @@ _last_node_status: dict[str, str] = {}
 _alert_channel_id: int | None = None
 
 _ALERT_CFG_PATH = Path(__file__).with_name("alert_config.json")
+_MONITOR_CFG_PATH = Path(__file__).with_name("health_monitors.json")
+
+_monitor_tasks: dict[str, asyncio.Task] = {}
+_monitor_targets: dict[str, dict] = {}  # service -> {"channel_id": int, "message_id": int}
 
 def _load_alert_channel_id() -> int | None:
     # Prefer config file; fall back to env for backwards compatibility.
@@ -78,6 +82,35 @@ def _save_alert_channel_id(channel_id: int | None) -> None:
     except Exception as e:
         # Don't crash the bot if the FS is read-only, etc.
         print(f"Failed to write alert config: {e}")
+
+def _load_monitors() -> dict[str, dict]:
+    try:
+        if _MONITOR_CFG_PATH.exists():
+            data = json.loads(_MONITOR_CFG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {}
+            out: dict[str, dict] = {}
+            for svc, v in data.items():
+                if not isinstance(v, dict):
+                    continue
+                cid = v.get("channel_id")
+                mid = v.get("message_id")
+                if isinstance(cid, str) and cid.isdigit():
+                    cid = int(cid)
+                if isinstance(mid, str) and mid.isdigit():
+                    mid = int(mid)
+                if isinstance(cid, int) and isinstance(mid, int):
+                    out[str(svc)] = {"channel_id": cid, "message_id": mid}
+            return out
+    except Exception as e:
+        print(f"Failed to load health monitors: {e}")
+    return {}
+
+def _save_monitors() -> None:
+    try:
+        _MONITOR_CFG_PATH.write_text(json.dumps(_monitor_targets, indent=2) + "\n", encoding="utf-8")
+    except Exception as e:
+        print(f"Failed to write health monitors: {e}")
 
 # ── Helpers (Basic) ───────────────────────────────────────────────────────────
 
@@ -243,34 +276,120 @@ async def poll_operation(op_id: str, message=None, max_wait: int = 60) -> dict:
     return await api_get(f"/operations/{op_id}")
 
 async def send_live_health_monitor(interaction: discord.Interaction, service_name: str = None):
-    title = f"🔍 Initializing {service_name or 'Global API'} monitor..."
+    # Service monitors are durable (persisted) and one-per-service.
+    if service_name:
+        msg = await start_or_move_service_monitor(service_name, interaction.channel_id)
+        if msg is None:
+            await interaction.followup.send("Failed to create the monitor message (missing permissions or invalid channel).")
+        return
+
+    # Global API monitor (not persisted; informational only)
+    title = "🔍 Initializing Heimdall API monitor..."
     msg = await interaction.followup.send(embed=discord.Embed(title=title, color=discord.Color.greyple()))
     async def monitor_loop():
         i = 0
         while True:
             i += 1
             try:
-                if service_name:
-                    data = await api_get(f"/services/{service_name}")
-                    status = data['status']
-                    color = discord.Color.green() if status == "healthy" else discord.Color.orange() if status == "booting" else discord.Color.red()
-                    title = f"{'🟢' if status == 'healthy' else '🟡' if status == 'booting' else '🔴'} Service: {service_name}"
-                    desc = f"Status: **{status}**\nNode: `{data['node']}`\nURL: {data['healthcheck_url'] or 'None'}"
-                else:
-                    data = await api_get("/health")
-                    status = data['status']
-                    color = discord.Color.green() if status == "ok" else discord.Color.red()
-                    title = f"{'🟢' if status == 'ok' else '🔴'} Heimdall API — Healthy"
-                    desc = f"Status: **{status}**\nURL: `{API_URL}`"
-                embed = discord.Embed(title=title, description=desc, color=color)
+                data = await api_get("/health")
+                status = data['status']
+                color = discord.Color.green() if status == "ok" else discord.Color.red()
+                title2 = f"{'🟢' if status == 'ok' else '🔴'} Heimdall API — Healthy"
+                desc = f"Status: **{status}**\nURL: `{API_URL}`"
+                embed = discord.Embed(title=title2, description=desc, color=color)
                 embed.set_footer(text=f"Live monitoring active • Updates: {i}")
                 await msg.edit(embed=embed)
             except Exception as e:
-                embed = discord.Embed(title=f"🔴 {service_name or 'Heimdall API'} — Unreachable", description=f"Failed to connect to Control Plane.\n\n**Error:**\n```{e}```", color=discord.Color.red())
+                embed = discord.Embed(title="🔴 Heimdall API — Unreachable", description=f"Failed to connect to Control Plane.\n\n**Error:**\n```{e}```", color=discord.Color.red())
                 embed.set_footer(text=f"Live monitoring active • Updates: {i}")
                 await msg.edit(embed=embed)
             await asyncio.sleep(5)
     asyncio.create_task(monitor_loop())
+
+async def _ensure_monitor_message(service_name: str, channel_id: int, message_id: int) -> discord.Message | None:
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+            return None
+        return await ch.fetch_message(message_id)
+    except Exception:
+        return None
+
+async def _create_monitor_message(service_name: str, channel_id: int) -> discord.Message | None:
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+            return None
+        title = f"🔍 Initializing {service_name} monitor..."
+        return await ch.send(embed=discord.Embed(title=title, color=discord.Color.greyple()))
+    except Exception:
+        return None
+
+async def _monitor_task_loop(service_name: str):
+    await bot.wait_until_ready()
+    i = 0
+    while not bot.is_closed():
+        target = _monitor_targets.get(service_name)
+        if not target:
+            return
+        channel_id = target["channel_id"]
+        message_id = target["message_id"]
+        msg = await _ensure_monitor_message(service_name, channel_id, message_id)
+        if msg is None:
+            new_msg = await _create_monitor_message(service_name, channel_id)
+            if new_msg is not None:
+                _monitor_targets[service_name] = {"channel_id": channel_id, "message_id": new_msg.id}
+                _save_monitors()
+                msg = new_msg
+            else:
+                await asyncio.sleep(10)
+                continue
+
+        i += 1
+        try:
+            data = await api_get(f"/services/{service_name}")
+            status = data['status']
+            color = discord.Color.green() if status == "healthy" else discord.Color.orange() if status == "booting" else discord.Color.red()
+            title2 = f"{'🟢' if status == 'healthy' else '🟡' if status == 'booting' else '🔴'} Service: {service_name}"
+            desc = f"Status: **{status}**\nNode: `{data['node']}`\nURL: {data['healthcheck_url'] or 'None'}"
+            embed = discord.Embed(title=title2, description=desc, color=color)
+            embed.set_footer(text=f"Live monitoring active • Updates: {i}")
+            await msg.edit(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(title=f"🔴 {service_name} — Unreachable", description=f"Failed to connect to Control Plane.\n\n**Error:**\n```{e}```", color=discord.Color.red())
+            embed.set_footer(text=f"Live monitoring active • Updates: {i}")
+            try:
+                await msg.edit(embed=embed)
+            except Exception:
+                pass
+
+        await asyncio.sleep(5)
+
+async def start_or_move_service_monitor(service_name: str, channel_id: int) -> discord.Message | None:
+    existing = _monitor_targets.get(service_name)
+    if existing and existing.get("channel_id") == channel_id:
+        msg = await _ensure_monitor_message(service_name, existing["channel_id"], existing["message_id"])
+        if msg is not None:
+            if service_name not in _monitor_tasks or _monitor_tasks[service_name].done():
+                _monitor_tasks[service_name] = asyncio.create_task(_monitor_task_loop(service_name))
+            return msg
+
+    msg = await _create_monitor_message(service_name, channel_id)
+    if msg is None:
+        return None
+
+    _monitor_targets[service_name] = {"channel_id": channel_id, "message_id": msg.id}
+    _save_monitors()
+
+    t = _monitor_tasks.get(service_name)
+    if t is not None:
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    _monitor_tasks[service_name] = asyncio.create_task(_monitor_task_loop(service_name))
+    return msg
 
 def normalize_agent_host(host: str) -> str:
     raw = host.strip()
@@ -417,7 +536,14 @@ async def cmd_services(interaction: discord.Interaction):
 @tree.command(name="health", description="Live health monitor.")
 async def cmd_health(interaction: discord.Interaction, service: str = None):
     await safe_defer(interaction)
-    await send_live_health_monitor(interaction, service_name=service)
+    if not service:
+        await send_live_health_monitor(interaction, service_name=None)
+        return
+    msg = await start_or_move_service_monitor(service, interaction.channel_id)
+    if msg is None:
+        await interaction.followup.send("Failed to create the monitor message (missing permissions or invalid channel).")
+        return
+    await interaction.followup.send(f"Monitoring `{service}` here. (Message id: `{msg.id}`)")
 
 @tree.command(name="deploy-all", description="Trigger a full deployment for ALL registered services.")
 async def cmd_deploy_all(interaction: discord.Interaction):
@@ -502,9 +628,20 @@ async def setup_hook():
     _alert_channel_id = _load_alert_channel_id()
     await _restart_alert_task()
 
+    # Restore persisted per-service monitors and (re)start their tasks.
+    _monitor_targets.update(_load_monitors())
+    for svc in list(_monitor_targets.keys()):
+        if svc not in _monitor_tasks or _monitor_tasks[svc].done():
+            _monitor_tasks[svc] = asyncio.create_task(_monitor_task_loop(svc))
+
 @bot.event
 async def on_ready():
     print(f"Heimdall bot ready: {bot.user}")
+    # Ensure monitors continue after reconnects.
+    for svc in list(_monitor_targets.keys()):
+        t = _monitor_tasks.get(svc)
+        if t is None or t.done():
+            _monitor_tasks[svc] = asyncio.create_task(_monitor_task_loop(svc))
 
 @bot.event
 async def on_disconnect():
