@@ -130,7 +130,13 @@ async def alert_monitor_loop():
                 prev = _last_node_status.get(name)
                 _last_node_status[name] = status
                 if prev is not None and prev != status and status == "OFFLINE":
-                    await channel.send(f"🔴 Node OFFLINE: `{name}`")
+                    embed = discord.Embed(
+                        title="🔴 Node Offline",
+                        color=discord.Color.red(),
+                    )
+                    embed.add_field(name="Node", value=f"`{name}`", inline=True)
+                    embed.add_field(name="Status", value="`OFFLINE`", inline=True)
+                    await channel.send(embed=embed)
 
             # Services
             services = await api_get("/services")
@@ -141,7 +147,39 @@ async def alert_monitor_loop():
                 prev = _last_service_status.get(name)
                 _last_service_status[name] = status
                 if prev is not None and prev != status and status == "dead":
-                    await channel.send(f"🔴 Service DEAD: `{name}` on node `{node_name}`")
+                    embed = discord.Embed(
+                        title="🔴 Service Down",
+                        color=discord.Color.red(),
+                    )
+                    embed.add_field(name="Service", value=f"`{name}`", inline=True)
+                    embed.add_field(name="Status", value="`dead`", inline=True)
+
+                    # Fetch rich service details for context (started by, flake, etc.)
+                    try:
+                        detail = await api_get(f"/services/{name}")
+                    except Exception:
+                        detail = None
+
+                    if detail:
+                        embed.add_field(name="Node", value=f"`{detail.get('node', node_name)}`", inline=True)
+                        started_by = detail.get("triggered_by")
+                        if started_by:
+                            embed.add_field(name="Triggered By", value=started_by, inline=False)
+                        health_url = detail.get("healthcheck_url")
+                        if health_url:
+                            embed.add_field(name="Healthcheck", value=f"`{health_url}`", inline=False)
+                        flake = detail.get("flake")
+                        if flake:
+                            embed.add_field(name="Flake", value=f"`{flake}`", inline=False)
+                        repo_url = detail.get("repo_url")
+                        if repo_url:
+                            embed.add_field(name="Repo", value=f"`{repo_url}`", inline=False)
+                        created_at = detail.get("created_at")
+                        if created_at:
+                            embed.set_footer(text=f"Declared at: {created_at}")
+                    else:
+                        embed.add_field(name="Node", value=f"`{node_name}`", inline=True)
+                    await channel.send(embed=embed)
         except Exception as e:
             # Avoid killing the bot for transient API/network failures.
             print(f"alert_monitor_loop error: {e}")

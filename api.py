@@ -499,6 +499,8 @@ async def list_services(
                 "name": s.name,
                 "status": s.status,
                 "node_name": s.node.name,
+                "triggered_by": s.triggered_by,
+                "healthcheck_url": s.healthcheck_url,
             }
             for s in services
         ]
@@ -522,6 +524,11 @@ async def get_service_detail(
             "status": svc.status,
             "healthcheck_url": svc.healthcheck_url,
             "node": svc.node.name,
+            "node_host": svc.node.host,
+            "repo_url": svc.repo_url,
+            "flake": svc.flake,
+            "triggered_by": svc.triggered_by,
+            "created_at": svc.created_at.isoformat() if svc.created_at else None,
         }
     finally:
         db.close()
