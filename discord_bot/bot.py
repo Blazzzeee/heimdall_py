@@ -12,6 +12,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 import json
 from pathlib import Path
+from datetime import datetime, UTC
 
 # Ultimate SSL Fix for restricted environments
 try:
@@ -291,17 +292,21 @@ async def send_live_health_monitor(interaction: discord.Interaction, service_nam
         while True:
             i += 1
             try:
+                t0 = asyncio.get_running_loop().time()
                 data = await api_get("/health")
+                poll_ms = int((asyncio.get_running_loop().time() - t0) * 1000)
                 status = data['status']
                 color = discord.Color.green() if status == "ok" else discord.Color.red()
                 title2 = f"{'🟢' if status == 'ok' else '🔴'} Heimdall API — Healthy"
                 desc = f"Status: **{status}**\nURL: `{API_URL}`"
                 embed = discord.Embed(title=title2, description=desc, color=color)
-                embed.set_footer(text=f"Live monitoring active • Updates: {i}")
+                last_updated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                embed.set_footer(text=f"Live monitoring active • Updates: {i} • Last update: {last_updated_at} • Poll: {poll_ms}ms")
                 await msg.edit(embed=embed)
             except Exception as e:
                 embed = discord.Embed(title="🔴 Heimdall API — Unreachable", description=f"Failed to connect to Control Plane.\n\n**Error:**\n```{e}```", color=discord.Color.red())
-                embed.set_footer(text=f"Live monitoring active • Updates: {i}")
+                last_updated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                embed.set_footer(text=f"Live monitoring active • Updates: {i} • Last update: {last_updated_at}")
                 await msg.edit(embed=embed)
             await asyncio.sleep(5)
     asyncio.create_task(monitor_loop())
@@ -347,17 +352,21 @@ async def _monitor_task_loop(service_name: str):
 
         i += 1
         try:
+            t0 = asyncio.get_running_loop().time()
             data = await api_get(f"/services/{service_name}")
+            poll_ms = int((asyncio.get_running_loop().time() - t0) * 1000)
             status = data['status']
             color = discord.Color.green() if status == "healthy" else discord.Color.orange() if status == "booting" else discord.Color.red()
             title2 = f"{'🟢' if status == 'healthy' else '🟡' if status == 'booting' else '🔴'} Service: {service_name}"
             desc = f"Status: **{status}**\nNode: `{data['node']}`\nURL: {data['healthcheck_url'] or 'None'}"
             embed = discord.Embed(title=title2, description=desc, color=color)
-            embed.set_footer(text=f"Live monitoring active • Updates: {i}")
+            last_updated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            embed.set_footer(text=f"Live monitoring active • Updates: {i} • Last update: {last_updated_at} • Poll: {poll_ms}ms")
             await msg.edit(embed=embed)
         except Exception as e:
             embed = discord.Embed(title=f"🔴 {service_name} — Unreachable", description=f"Failed to connect to Control Plane.\n\n**Error:**\n```{e}```", color=discord.Color.red())
-            embed.set_footer(text=f"Live monitoring active • Updates: {i}")
+            last_updated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            embed.set_footer(text=f"Live monitoring active • Updates: {i} • Last update: {last_updated_at}")
             try:
                 await msg.edit(embed=embed)
             except Exception:
@@ -365,18 +374,31 @@ async def _monitor_task_loop(service_name: str):
 
         await asyncio.sleep(5)
 
-async def start_or_move_service_monitor(service_name: str, channel_id: int) -> discord.Message | None:
-    existing = _monitor_targets.get(service_name)
-    if existing and existing.get("channel_id") == channel_id:
-        msg = await _ensure_monitor_message(service_name, existing["channel_id"], existing["message_id"])
-        if msg is not None:
-            if service_name not in _monitor_tasks or _monitor_tasks[service_name].done():
-                _monitor_tasks[service_name] = asyncio.create_task(_monitor_task_loop(service_name))
-            return msg
+async def _discard_monitor_message(service_name: str, channel_id: int, message_id: int, new_message: discord.Message | None) -> None:
+    old_msg = await _ensure_monitor_message(service_name, channel_id, message_id)
+    if old_msg is None:
+        return
+    moved_to = f"New monitor message: `{new_message.id}`" if new_message else "New monitor message created."
+    embed = discord.Embed(
+        title=f"ℹ️ Monitor Superseded: {service_name}",
+        description=f"This monitor is no longer active.\n\n{moved_to}",
+        color=discord.Color.dark_grey(),
+    )
+    embed.set_footer(text=f"Superseded at: {datetime.now(UTC).isoformat().replace('+00:00','Z')}")
+    try:
+        await old_msg.edit(embed=embed)
+    except Exception:
+        pass
 
+async def start_or_move_service_monitor(service_name: str, channel_id: int) -> discord.Message | None:
+    # Always create a fresh message when /health is run; supersede any existing one.
+    existing = _monitor_targets.get(service_name)
     msg = await _create_monitor_message(service_name, channel_id)
     if msg is None:
         return None
+
+    if existing:
+        await _discard_monitor_message(service_name, existing["channel_id"], existing["message_id"], msg)
 
     _monitor_targets[service_name] = {"channel_id": channel_id, "message_id": msg.id}
     _save_monitors()
